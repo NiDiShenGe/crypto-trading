@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Trader · Paper Desk</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">BITGET · LOCAL EXECUTION</p>
+        <h1>Paper Trading Desk</h1>
+        <p class="subtitle">实盘行情，本地撮合。没有真实订单。</p>
+      </div>
+      <div class="status">
+        <span class="pulse"></span>
+        <span id="mode">PAPER</span>
+        <small id="updated">等待数据</small>
+      </div>
+    </header>
+
+    <main>
+      <section class="metrics">
+        <article><span>纸面现金</span><strong id="cash">—</strong><small>USDT</small></article>
+        <article><span>已实现盈亏</span><strong id="pnl">—</strong><small id="return">—</small></article>
+        <article><span>当前持仓</span><strong id="position-count">—</strong><small id="position-limit">上限 —</small></article>
+        <article><span>胜率</span><strong id="win-rate">—</strong><small id="win-loss">—</small></article>
+      </section>
+
+      <section class="grid">
+        <article class="panel positions">
+          <div class="panel-head">
+            <div><p class="eyebrow">OPEN RISK</p><h2>当前持仓</h2></div>
+            <span class="badge" id="loss-streak">连续亏损 0</span>
+          </div>
+          <div id="positions" class="empty">暂无持仓，系统正在等待严格信号。</div>
+        </article>
+
+        <article class="panel scanner">
+          <div class="panel-head">
+            <div><p class="eyebrow">MARKET RADAR</p><h2>最近扫描</h2></div>
+            <span class="badge">5 MIN</span>
+          </div>
+          <div class="radar">
+            <div><strong id="markets">—</strong><span>合约市场</span></div>
+            <div><strong id="eligible">—</strong><span>通过筛选</span></div>
+            <div><strong id="scanned">—</strong><span>高波动候选</span></div>
+            <div><strong id="signal-count">—</strong><span>本轮信号</span></div>
+          </div>
+          <p id="scan-time" class="muted">尚无扫描记录</p>
+        </article>
+
+        <article class="panel wide">
+          <div class="panel-head">
+            <div><p class="eyebrow">EXECUTION LOG</p><h2>纸面成交</h2></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>币种</th><th>方向</th><th>事件</th><th>价格</th><th>数量</th><th>盈亏</th></tr></thead>
+              <tbody id="fills"><tr><td colspan="7" class="empty-cell">暂无成交</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">SIGNALS</p><h2>策略信号</h2></div></div>
+          <div id="signals" class="feed"><p class="empty">暂无信号</p></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">SYSTEM</p><h2>系统状态</h2></div></div>
+          <div id="system" class="system-list"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

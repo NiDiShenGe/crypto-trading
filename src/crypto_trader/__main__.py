@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+from .config import load_settings
+from .env import load_env
+from .exchange.bitget import BitgetClient
+from .execution import PaperTradingEngine
+from .notifications import EmailConfig, EmailNotifier
+from .paper import PaperBroker
+from .scanner import MarketScanner
+from .storage import EventStore
+from .web import serve
+
+
+def main() -> None:
+    load_env()
+    settings = load_settings()
+    store = EventStore()
+    store.initialize()
+    if os.getenv("EXECUTION_MODE", "paper").lower() != "paper":
+        raise RuntimeError("Current version only allows EXECUTION_MODE=paper")
+
+    email_configured = all(
+        (
+            os.getenv("SMTP_USERNAME"),
+            os.getenv("SMTP_PASSWORD"),
+            os.getenv("ALERT_EMAIL_FROM"),
+            os.getenv("ALERT_EMAIL_TO"),
+        )
+    )
+    print(
+        f"crypto-trader ready | exchange=Bitget | mode=PAPER | "
+        f"risk/trade={settings.risk.risk_per_trade:.0%} | "
+        f"max leverage={settings.risk.maximum_leverage}x"
+    )
+    print(f"email alerts: {'configured' if email_configured else 'not configured'}")
+
+    command = sys.argv[1].lower() if len(sys.argv) > 1 else "run"
+    if command not in {"run", "scan", "test-email", "web"}:
+        raise SystemExit("Usage: python -m crypto_trader [run|scan|test-email|web]")
+
+    if command == "test-email":
+        if not email_configured:
+            raise SystemExit("Email is not configured in .env")
+        _build_notifier().send(
+            "Email configuration test",
+            "QQ email alerts are configured correctly. This is a test message.",
+        )
+        print("test email sent")
+        return
+    if command == "web":
+        serve()
+        return
+
+    saved_broker = store.load_state("paper_broker")
+    old_saved_equity = (
+        float(saved_broker.get("initial_equity", settings.paper.initial_equity))
+        if saved_broker
+        else settings.paper.initial_equity
+    )
+    saved_broker = _sync_paper_capital(saved_broker, settings.paper.initial_equity)
+    runtime_state = _sync_runtime_capital(
+        store.load_state("runtime_risk"),
+        settings.paper.initial_equity - old_saved_equity,
+    )
+    broker = (
+        PaperBroker.from_dict(saved_broker)
+        if saved_broker
+        else PaperBroker(
+            initial_equity=settings.paper.initial_equity,
+            taker_fee_rate=settings.paper.taker_fee_rate,
+            slippage_rate=settings.paper.slippage_rate,
+        )
+    )
+    engine = PaperTradingEngine(
+        settings,
+        store,
+        broker,
+        _build_notifier() if email_configured else None,
+        runtime_state=runtime_state,
+    )
+    scanner = MarketScanner(BitgetClient(demo_mode=True), settings)
+    print(
+        f"paper account: cash={broker.cash:.4f} USDT "
+        f"open_positions={len(broker.positions)}"
+    )
+
+    if command == "scan":
+        _scan_and_report(scanner, store, engine)
+        return
+
+    print(f"scanner interval: {settings.universe.scan_interval_seconds} seconds")
+    while True:
+        started = time.monotonic()
+        try:
+            _scan_and_report(scanner, store, engine)
+        except KeyboardInterrupt:
+            print("stopped by user")
+            return
+        except Exception as exc:
+            store.append("scanner_error", {"error": str(exc)})
+            print(f"scanner error: {exc}")
+        elapsed = time.monotonic() - started
+        try:
+            time.sleep(max(settings.universe.scan_interval_seconds - elapsed, 1))
+        except KeyboardInterrupt:
+            print("stopped by user")
+            return
+
+
+def _scan_and_report(
+    scanner: MarketScanner,
+    store: EventStore,
+    engine: PaperTradingEngine,
+) -> None:
+    result = scanner.scan_once()
+    store.append(
+        "market_scan",
+        {
+            "total_markets": result.total_markets,
+            "eligible_markets": result.eligible_markets,
+            "scanned_candidates": result.scanned_candidates,
+            "signals": len(result.signals),
+        },
+    )
+    stamp = result.scanned_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    print(
+        f"[{stamp}] markets={result.total_markets} eligible={result.eligible_markets} "
+        f"scanned={result.scanned_candidates} signals={len(result.signals)}"
+    )
+    for signal in result.signals:
+        store.append(
+            "strategy_signal",
+            {
+                "side": signal.side.value,
+                "entry": signal.entry,
+                "stop": signal.stop,
+                "confidence": signal.confidence,
+                "reason": signal.reason,
+            },
+            signal.symbol,
+        )
+        print(
+            f"SIGNAL {signal.symbol} {signal.side.value.upper()} "
+            f"entry={signal.entry:g} stop={signal.stop:g}"
+        )
+
+    fills = engine.process(result)
+    for fill in fills:
+        print(
+            f"PAPER FILL {fill.symbol} {fill.reason} qty={fill.quantity:g} "
+            f"price={fill.price:g} pnl={fill.realized_pnl:.4f}"
+        )
+    equity = engine.broker.equity(result.prices)
+    print(
+        f"paper equity={equity:.4f} USDT "
+        f"cash={engine.broker.cash:.4f} positions={len(engine.broker.positions)}"
+    )
+
+
+def _build_notifier() -> EmailNotifier:
+    return EmailNotifier(
+        EmailConfig(
+            host=os.getenv("SMTP_HOST") or "smtp.qq.com",
+            port=int(os.getenv("SMTP_PORT", "465")),
+            username=os.environ["SMTP_USERNAME"],
+            password=os.environ["SMTP_PASSWORD"],
+            sender=os.environ["ALERT_EMAIL_FROM"],
+            recipient=os.environ["ALERT_EMAIL_TO"],
+        )
+    )
+
+
+def _sync_paper_capital(saved: dict | None, configured_equity: float) -> dict | None:
+    """Apply capital config changes without discarding open paper positions."""
+    if not saved:
+        return None
+    old_equity = float(saved.get("initial_equity", configured_equity))
+    difference = configured_equity - old_equity
+    if abs(difference) < 1e-12:
+        return saved
+    updated = dict(saved)
+    updated["initial_equity"] = configured_equity
+    updated["cash"] = float(saved.get("cash", old_equity)) + difference
+    return updated
+
+
+def _sync_runtime_capital(saved: dict | None, difference: float) -> dict | None:
+    if not saved or abs(difference) < 1e-12:
+        return saved
+    updated = dict(saved)
+    updated["day_start_equity"] = float(saved["day_start_equity"]) + difference
+    updated["equity_high_watermark"] = float(saved["equity_high_watermark"]) + difference
+    return updated
+
+
+if __name__ == "__main__":
+    main()
