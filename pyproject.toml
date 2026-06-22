@@ -7,7 +7,7 @@ name = "crypto-trader"
 version = "0.1.0"
 description = "Risk-first Bitget USDT perpetual trend trading system"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["websocket-client>=1.9,<2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -15,4 +15,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

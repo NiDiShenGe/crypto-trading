@@ -40,6 +40,7 @@ class RiskManager:
         signal: Signal,
         existing_symbol_risk: float = 0.0,
         exchange_healthy: bool = True,
+        symbol_maximum_leverage: int | None = None,
     ) -> RiskDecision:
         mode = self.trading_mode(account, exchange_healthy)
         if mode is not TradingMode.NORMAL:
@@ -62,12 +63,21 @@ class RiskManager:
             return RiskDecision(False, mode, "symbol risk limit reached")
 
         quantity = risk_budget / signal.stop_distance
-        leverage = self.dynamic_leverage(signal.stop_distance / signal.entry)
+        leverage = self.dynamic_leverage(
+            signal.stop_distance / signal.entry,
+            symbol_maximum_leverage=symbol_maximum_leverage,
+        )
         return RiskDecision(True, mode, "entry approved", quantity=quantity, leverage=leverage)
 
-    def dynamic_leverage(self, stop_ratio: float) -> int:
+    def dynamic_leverage(
+        self,
+        stop_ratio: float,
+        *,
+        symbol_maximum_leverage: int | None = None,
+    ) -> int:
+        if self.config.use_exchange_max_leverage and symbol_maximum_leverage:
+            return max(1, symbol_maximum_leverage)
         if stop_ratio <= 0:
             return self.config.minimum_leverage
         target = round(0.02 / stop_ratio)
         return max(self.config.minimum_leverage, min(target, self.config.maximum_leverage))
-

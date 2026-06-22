@@ -2,7 +2,7 @@
 name = "bitget"
 product_type = "USDT-FUTURES"
 margin_coin = "USDT"
-margin_mode = "isolated"
+margin_mode = "crossed"
 # paper: 使用 Bitget 实盘公开行情，在本地撮合，不向交易所发单
 # live: 实盘交易（当前版本禁止）
 execution_mode = "paper"
@@ -19,6 +19,7 @@ minimum_listing_days = 30
 minimum_quote_volume_24h = 10000000.0
 maximum_spread_ratio = 0.003
 scan_interval_seconds = 300
+scan_after_close_delay_seconds = 3
 maximum_scan_candidates = 20
 excluded_base_assets = ["USDC", "USDE", "DAI", "FDUSD", "TUSD", "EUR", "BGB"]
 
@@ -47,7 +48,8 @@ test_maximum_positions = 3
 production_maximum_positions = 5
 test_equity_threshold = 200.0
 minimum_leverage = 2
-maximum_leverage = 5
+maximum_leverage = 125
+use_exchange_max_leverage = true
 maximum_consecutive_losses = 4
 cooldown_hours_after_loss_streak = 12
 

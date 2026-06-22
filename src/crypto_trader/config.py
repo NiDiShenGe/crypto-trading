@@ -13,6 +13,7 @@ class UniverseConfig:
     excluded_base_assets: frozenset[str]
     scan_interval_seconds: int = 300
     maximum_scan_candidates: int = 20
+    scan_after_close_delay_seconds: int = 3
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class RiskConfig:
     minimum_leverage: int
     maximum_leverage: int
     maximum_consecutive_losses: int
+    use_exchange_max_leverage: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,9 @@ def load_settings(path: str | Path = "config/settings.toml") -> Settings:
             excluded_base_assets=frozenset(universe["excluded_base_assets"]),
             scan_interval_seconds=universe["scan_interval_seconds"],
             maximum_scan_candidates=universe["maximum_scan_candidates"],
+            scan_after_close_delay_seconds=universe.get(
+                "scan_after_close_delay_seconds", 3
+            ),
         ),
         strategy=StrategyConfig(**{
             key: raw["strategy"][key]

@@ -59,7 +59,7 @@ web.cmd
 powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
-纸面交易直接读取 Bitget 实盘公开行情，在本地模拟滑点、手续费、持仓和盈亏，不需要 API Key，也不会向交易所发送订单。
+纸面交易直接读取 Bitget 实盘公开行情，在本地模拟滑点、手续费、持仓和盈亏，不需要 API Key，也不会向交易所发送订单。信号扫描严格在每根 5 分钟 K 线收盘后执行，并排除尚未收盘的 K 线。
 
 QQ 邮件需要在 QQ 邮箱中开启 SMTP 服务并创建授权码。`.env` 中的 `SMTP_PASSWORD` 应填写授权码，不是 QQ 登录密码。
 

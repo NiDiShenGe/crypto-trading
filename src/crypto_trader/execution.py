@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from threading import RLock
 
 from .config import Settings
 from .domain import AccountState, Side, Signal
@@ -33,6 +34,7 @@ class PaperTradingEngine:
         self.store = store
         self.broker = broker
         self.notifier = notifier
+        self._lock = RLock()
         now = datetime.now(UTC).date()
         if runtime_state:
             self.runtime = RuntimeRiskState(
@@ -45,62 +47,167 @@ class PaperTradingEngine:
             self.runtime = RuntimeRiskState(now, broker.initial_equity, broker.initial_equity)
 
     def process(self, result: ScanResult) -> list[PaperFill]:
-        fills: list[PaperFill] = []
-        prices = result.prices
-        fills.extend(self._manage_positions(prices))
-        equity = self.broker.equity(prices)
-        self._roll_day(equity)
-        self.runtime.equity_high_watermark = max(
-            self.runtime.equity_high_watermark, equity
-        )
-        for signal in result.signals:
-            if signal.symbol in self.broker.positions or signal.symbol not in prices:
-                continue
-            live_signal = Signal(
-                symbol=signal.symbol,
-                side=signal.side,
-                entry=prices[signal.symbol],
-                stop=signal.stop,
-                confidence=signal.confidence,
-                reason=signal.reason,
-            )
-            stop_is_valid = (
-                live_signal.stop < live_signal.entry
-                if live_signal.side is Side.LONG
-                else live_signal.stop > live_signal.entry
-            )
-            if not stop_is_valid:
-                self.store.append(
-                    "entry_rejected",
-                    {"reason": "stale signal: stop is invalid at current price"},
-                    signal.symbol,
-                )
-                continue
-            account = AccountState(
-                equity=equity,
-                day_start_equity=self.runtime.day_start_equity,
-                equity_high_watermark=self.runtime.equity_high_watermark,
-                open_positions=len(self.broker.positions),
-                consecutive_losses=self.runtime.consecutive_losses,
-            )
-            decision = RiskManager(self.settings.risk).evaluate_entry(account, live_signal)
-            if not decision.approved:
-                self.store.append(
-                    "entry_rejected",
-                    {"reason": decision.reason, "mode": decision.mode.value},
-                    signal.symbol,
-                )
-                continue
-            try:
-                fill = self.broker.open_position(
-                    live_signal, decision.quantity, decision.leverage
-                )
-            except ValueError as exc:
-                self.store.append("entry_rejected", {"reason": str(exc)}, signal.symbol)
-                continue
-            fills.append(fill)
+        with self._lock:
+            fills: list[PaperFill] = []
+            prices = result.prices
+            # The 5-minute loop is now an emergency fallback for exits. Normal
+            # position management is driven by the realtime WebSocket monitor.
+            fills.extend(self._manage_positions(prices))
             equity = self.broker.equity(prices)
-            self._record_fill(fill, decision.leverage)
+            self._roll_day(equity)
+            self.runtime.equity_high_watermark = max(
+                self.runtime.equity_high_watermark, equity
+            )
+            for signal in result.signals:
+                if signal.symbol in self.broker.positions or signal.symbol not in prices:
+                    continue
+                live_signal = Signal(
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    entry=prices[signal.symbol],
+                    stop=signal.stop,
+                    confidence=signal.confidence,
+                    reason=signal.reason,
+                )
+                stop_is_valid = (
+                    live_signal.stop < live_signal.entry
+                    if live_signal.side is Side.LONG
+                    else live_signal.stop > live_signal.entry
+                )
+                if not stop_is_valid:
+                    self.store.append(
+                        "entry_rejected",
+                        {"reason": "stale signal: stop is invalid at current price"},
+                        signal.symbol,
+                    )
+                    continue
+                account = AccountState(
+                    equity=equity,
+                    day_start_equity=self.runtime.day_start_equity,
+                    equity_high_watermark=self.runtime.equity_high_watermark,
+                    open_positions=len(self.broker.positions),
+                    consecutive_losses=self.runtime.consecutive_losses,
+                )
+                decision = RiskManager(self.settings.risk).evaluate_entry(
+                    account,
+                    live_signal,
+                    symbol_maximum_leverage=result.maximum_leverages.get(signal.symbol),
+                )
+                if not decision.approved:
+                    self.store.append(
+                        "entry_rejected",
+                        {"reason": decision.reason, "mode": decision.mode.value},
+                        signal.symbol,
+                    )
+                    continue
+                try:
+                    fill = self.broker.open_position(
+                        live_signal, decision.quantity, decision.leverage
+                    )
+                except ValueError as exc:
+                    self.store.append("entry_rejected", {"reason": str(exc)}, signal.symbol)
+                    continue
+                fills.append(fill)
+                equity = self.broker.equity(prices)
+                self._record_fill(fill, decision.leverage)
+            self._save_state()
+            return fills
+
+    def process_realtime_price(self, symbol: str, price: float) -> list[PaperFill]:
+        """Manage one open position from a realtime ticker update."""
+        if price <= 0:
+            return []
+        with self._lock:
+            if symbol not in self.broker.positions:
+                return []
+            fills, changed = self._manage_position(symbol, price)
+            if changed or fills:
+                self._save_state()
+            return fills
+
+    def _manage_positions(self, prices: dict[str, float]) -> list[PaperFill]:
+        fills: list[PaperFill] = []
+        for symbol in list(self.broker.positions):
+            if symbol not in prices:
+                continue
+            position_fills, _ = self._manage_position(symbol, prices[symbol])
+            fills.extend(position_fills)
+        return fills
+
+    def _manage_position(self, symbol: str, price: float) -> tuple[list[PaperFill], bool]:
+        position = self.broker.positions[symbol]
+        changed = False
+        risk = abs(position.entry_price - position.initial_stop_price)
+        if risk <= 0:
+            return [], False
+        old_best = position.best_price
+        position.best_price = (
+            max(position.best_price, price)
+            if position.side is Side.LONG
+            else min(position.best_price, price)
+        )
+        changed = position.best_price != old_best
+        stop_hit = (
+            price <= position.stop_price
+            if position.side is Side.LONG
+            else price >= position.stop_price
+        )
+        if stop_hit:
+            fill = self.broker.close_position(symbol, price, "stop loss")
+            self._after_exit(fill)
+            return [fill], True
+
+        favorable = (
+            price - position.entry_price
+            if position.side is Side.LONG
+            else position.entry_price - price
+        )
+        old_stop = position.stop_price
+        if favorable >= risk * self.settings.strategy.breakeven_at_r:
+            if position.side is Side.LONG:
+                position.stop_price = max(position.stop_price, position.entry_price)
+            else:
+                position.stop_price = min(position.stop_price, position.entry_price)
+        changed = changed or position.stop_price != old_stop
+
+        fills: list[PaperFill] = []
+        if (
+            not position.first_take_profit_done
+            and favorable >= risk * self.settings.strategy.first_take_profit_at_r
+        ):
+            quantity = position.original_quantity * self.settings.strategy.first_take_profit_fraction
+            fill = self.broker.close_position(symbol, price, "first take profit", quantity)
+            fills.append(fill)
+            self._after_exit(fill)
+            if symbol not in self.broker.positions:
+                return fills, True
+            self.broker.positions[symbol].first_take_profit_done = True
+            position = self.broker.positions[symbol]
+            changed = True
+
+        if favorable >= risk * self.settings.strategy.breakeven_at_r:
+            old_stop = position.stop_price
+            trailing_distance = (
+                risk
+                / self.settings.strategy.stop_atr_multiple
+                * self.settings.strategy.trailing_atr_multiple
+            )
+            if position.side is Side.LONG:
+                position.stop_price = max(
+                    position.stop_price, position.best_price - trailing_distance
+                )
+            else:
+                position.stop_price = min(
+                    position.stop_price, position.best_price + trailing_distance
+                )
+            changed = changed or position.stop_price != old_stop
+        return fills, changed
+
+    def position_symbols(self) -> set[str]:
+        with self._lock:
+            return set(self.broker.positions)
+
+    def _save_state(self) -> None:
         self.store.save_state("paper_broker", self.broker.to_dict())
         self.store.save_state(
             "runtime_risk",
@@ -111,73 +218,6 @@ class PaperTradingEngine:
                 "consecutive_losses": self.runtime.consecutive_losses,
             },
         )
-        return fills
-
-    def _manage_positions(self, prices: dict[str, float]) -> list[PaperFill]:
-        fills: list[PaperFill] = []
-        for symbol in list(self.broker.positions):
-            if symbol not in prices:
-                continue
-            position = self.broker.positions[symbol]
-            price = prices[symbol]
-            risk = abs(position.entry_price - position.initial_stop_price)
-            if risk <= 0:
-                continue
-            position.best_price = (
-                max(position.best_price, price)
-                if position.side is Side.LONG
-                else min(position.best_price, price)
-            )
-            stop_hit = (
-                price <= position.stop_price
-                if position.side is Side.LONG
-                else price >= position.stop_price
-            )
-            if stop_hit:
-                fill = self.broker.close_position(symbol, price, "stop loss")
-                fills.append(fill)
-                self._after_exit(fill)
-                continue
-
-            favorable = (
-                price - position.entry_price
-                if position.side is Side.LONG
-                else position.entry_price - price
-            )
-            if favorable >= risk * self.settings.strategy.breakeven_at_r:
-                if position.side is Side.LONG:
-                    position.stop_price = max(position.stop_price, position.entry_price)
-                else:
-                    position.stop_price = min(position.stop_price, position.entry_price)
-
-            if (
-                not position.first_take_profit_done
-                and favorable >= risk * self.settings.strategy.first_take_profit_at_r
-            ):
-                quantity = position.original_quantity * self.settings.strategy.first_take_profit_fraction
-                fill = self.broker.close_position(symbol, price, "first take profit", quantity)
-                fills.append(fill)
-                self._after_exit(fill)
-                if symbol not in self.broker.positions:
-                    continue
-                self.broker.positions[symbol].first_take_profit_done = True
-                position = self.broker.positions[symbol]
-
-            if favorable >= risk * self.settings.strategy.breakeven_at_r:
-                trailing_distance = (
-                    risk
-                    / self.settings.strategy.stop_atr_multiple
-                    * self.settings.strategy.trailing_atr_multiple
-                )
-                if position.side is Side.LONG:
-                    position.stop_price = max(
-                        position.stop_price, position.best_price - trailing_distance
-                    )
-                else:
-                    position.stop_price = min(
-                        position.stop_price, position.best_price + trailing_distance
-                    )
-        return fills
 
     def _after_exit(self, fill: PaperFill) -> None:
         self.runtime.consecutive_losses = (

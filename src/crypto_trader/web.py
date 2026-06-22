@@ -27,6 +27,8 @@ def dashboard_data(store: EventStore) -> dict:
     errors = (
         store.recent_by_type("scanner_error", 20)
         + store.recent_by_type("notification_error", 20)
+        + store.recent_by_type("realtime_error", 20)
+        + store.recent_by_type("realtime_disconnected", 20)
     )
 
     realized_pnl = sum(float(item["payload"].get("realized_pnl", 0)) for item in fills)

@@ -20,6 +20,7 @@ class PaperPosition:
     original_quantity: float
     best_price: float
     first_take_profit_done: bool = False
+    margin_mode: str = "crossed"
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class PaperBroker:
             initial_stop_price=signal.stop,
             original_quantity=quantity,
             best_price=fill_price,
+            margin_mode="crossed",
         )
         fill = PaperFill(
             symbol=signal.symbol,

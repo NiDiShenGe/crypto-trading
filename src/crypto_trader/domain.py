@@ -39,6 +39,7 @@ class Market:
     change_24h: float = 0.0
     high_24h: float = 0.0
     low_24h: float = 0.0
+    maximum_leverage: int = 1
 
     @property
     def spread_ratio(self) -> float:

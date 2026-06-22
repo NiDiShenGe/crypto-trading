@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 
 from .config import load_settings
 from .env import load_env
@@ -10,6 +11,7 @@ from .exchange.bitget import BitgetClient
 from .execution import PaperTradingEngine
 from .notifications import EmailConfig, EmailNotifier
 from .paper import PaperBroker
+from .realtime import BitgetPositionMonitor
 from .scanner import MarketScanner
 from .storage import EventStore
 from .web import serve
@@ -34,7 +36,7 @@ def main() -> None:
     print(
         f"crypto-trader ready | exchange=Bitget | mode=PAPER | "
         f"risk/trade={settings.risk.risk_per_trade:.0%} | "
-        f"max leverage={settings.risk.maximum_leverage}x"
+        f"leverage={'EXCHANGE MAX' if settings.risk.use_exchange_max_leverage else str(settings.risk.maximum_leverage) + 'x'}"
     )
     print(f"email alerts: {'configured' if email_configured else 'not configured'}")
 
@@ -92,23 +94,32 @@ def main() -> None:
         _scan_and_report(scanner, store, engine)
         return
 
-    print(f"scanner interval: {settings.universe.scan_interval_seconds} seconds")
+    monitor = BitgetPositionMonitor(engine, store)
+    monitor.start()
+    print("position monitor: Bitget WebSocket realtime ticker")
+    print(
+        "signal scanner: after each closed 5-minute candle "
+        f"(delay={settings.universe.scan_after_close_delay_seconds}s)"
+    )
     while True:
-        started = time.monotonic()
         try:
+            wait_seconds, next_scan = seconds_until_next_scan(
+                settings.universe.scan_interval_seconds,
+                settings.universe.scan_after_close_delay_seconds,
+            )
+            print(
+                "next signal scan: "
+                f"{next_scan.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            time.sleep(wait_seconds)
             _scan_and_report(scanner, store, engine)
         except KeyboardInterrupt:
+            monitor.stop()
             print("stopped by user")
             return
         except Exception as exc:
             store.append("scanner_error", {"error": str(exc)})
             print(f"scanner error: {exc}")
-        elapsed = time.monotonic() - started
-        try:
-            time.sleep(max(settings.universe.scan_interval_seconds - elapsed, 1))
-        except KeyboardInterrupt:
-            print("stopped by user")
-            return
 
 
 def _scan_and_report(
@@ -172,6 +183,23 @@ def _build_notifier() -> EmailNotifier:
             recipient=os.environ["ALERT_EMAIL_TO"],
         )
     )
+
+
+def seconds_until_next_scan(
+    interval_seconds: int,
+    delay_seconds: int,
+    now: datetime | None = None,
+) -> tuple[float, datetime]:
+    """Schedule scans just after the next UTC-aligned candle close."""
+    if interval_seconds <= 0 or delay_seconds < 0:
+        raise ValueError("invalid scan schedule")
+    current = now or datetime.now(UTC)
+    timestamp = current.timestamp()
+    next_boundary = (int(timestamp // interval_seconds) + 1) * interval_seconds
+    target = datetime.fromtimestamp(next_boundary, tz=UTC) + timedelta(
+        seconds=delay_seconds
+    )
+    return max((target - current).total_seconds(), 0), target
 
 
 def _sync_paper_capital(saved: dict | None, configured_equity: float) -> dict | None:

@@ -33,7 +33,7 @@ async function refresh() {
         <div><small>数量</small><strong>${num(p.quantity, 8)}</strong></div>
         <div><small>入场</small><strong>${num(p.entry_price, 8)}</strong></div>
         <div><small>止损</small><strong>${num(p.stop_price, 8)}</strong></div>
-        <div><small>杠杆</small><strong>${p.leverage}×</strong></div>
+        <div><small>全仓杠杆</small><strong>${p.leverage}×</strong></div>
       </div>`).join("") : `<div class="empty">暂无持仓，系统正在等待严格信号。</div>`;
 
     $("fills").innerHTML = data.fills.length ? data.fills.map(item => {
@@ -50,7 +50,7 @@ async function refresh() {
     `).join("") : `<p class="empty">暂无信号</p>`;
 
     $("system").innerHTML = `
-      <div class="system-row"><span>执行模式</span><strong>PAPER · 本地撮合</strong></div>
+      <div class="system-row"><span>执行模式</span><strong>PAPER · 全仓模拟</strong></div>
       <div class="system-row"><span>权益高水位</span><strong>${num(data.account.high_watermark)} USDT</strong></div>
       <div class="system-row"><span>最近错误</span><strong class="${data.errors.length ? "negative" : "positive"}">${data.errors.length}</strong></div>
       <div class="system-row"><span>数据刷新</span><strong>每 10 秒</strong></div>`;

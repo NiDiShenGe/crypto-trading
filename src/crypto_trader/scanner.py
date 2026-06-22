@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from dataclasses import field
 from datetime import UTC, datetime, timedelta
 
 from .config import Settings
@@ -18,6 +19,7 @@ class ScanResult:
     scanned_candidates: int
     signals: tuple[Signal, ...]
     prices: dict[str, float]
+    maximum_leverages: dict[str, int] = field(default_factory=dict)
 
 
 class MarketScanner:
@@ -35,8 +37,12 @@ class MarketScanner:
         candidates = self._high_volatility_candidates(eligible)
         signals: list[Signal] = []
         for market in candidates:
-            signal_candles = self.client.candles(market.symbol, "5m", limit=100)
-            trend_candles = self.client.candles(market.symbol, "1H", limit=100)
+            signal_candles = closed_candles(
+                self.client.candles(market.symbol, "5m", limit=100), 300
+            )
+            trend_candles = closed_candles(
+                self.client.candles(market.symbol, "1H", limit=100), 3600
+            )
             signal = self.strategy.evaluate(market.symbol, signal_candles, trend_candles)
             if signal is not None:
                 signals.append(signal)
@@ -50,6 +56,9 @@ class MarketScanner:
                 market.symbol: (market.bid + market.ask) / 2
                 for market in markets
                 if market.bid > 0 and market.ask > 0
+            },
+            maximum_leverages={
+                market.symbol: market.maximum_leverage for market in markets
             },
         )
 
@@ -96,3 +105,17 @@ class MarketScanner:
             reverse=True,
         )
         return ranked[: self.settings.universe.maximum_scan_candidates]
+
+
+def closed_candles(
+    candles: list,
+    interval_seconds: int,
+    now: datetime | None = None,
+) -> list:
+    """Exclude the currently forming candle from signal evaluation."""
+    current = now or datetime.now(UTC)
+    return [
+        candle
+        for candle in candles
+        if candle.timestamp + timedelta(seconds=interval_seconds) <= current
+    ]

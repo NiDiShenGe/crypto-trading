@@ -188,6 +188,9 @@ class BitgetClient:
                     change_24h=self._number(ticker.get("change24h")),
                     high_24h=self._number(ticker.get("high24h")),
                     low_24h=self._number(ticker.get("low24h")),
+                    maximum_leverage=max(
+                        1, int(self._number(contract.get("maxLever")) or 1)
+                    ),
                 )
             )
         return result

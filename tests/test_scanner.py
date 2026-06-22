@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from crypto_trader.config import RiskConfig, Settings, StrategyConfig, UniverseConfig
 from crypto_trader.domain import Candle, Market
-from crypto_trader.scanner import MarketScanner
+from crypto_trader.scanner import MarketScanner, closed_candles
 
 
 class FakeClient:
@@ -44,3 +44,14 @@ def test_unknown_listing_age_can_be_confirmed_by_daily_history() -> None:
     ]
     result = MarketScanner(client, settings()).scan_once()
     assert result.eligible_markets == 1
+
+
+def test_current_forming_candle_is_excluded() -> None:
+    now = datetime(2026, 1, 1, 12, 7, tzinfo=UTC)
+    candles = [
+        Candle(datetime(2026, 1, 1, 11, 55, tzinfo=UTC), 1, 1, 1, 1, 1),
+        Candle(datetime(2026, 1, 1, 12, 0, tzinfo=UTC), 1, 1, 1, 1, 1),
+        Candle(datetime(2026, 1, 1, 12, 5, tzinfo=UTC), 1, 1, 1, 1, 1),
+    ]
+    result = closed_candles(candles, 300, now)
+    assert [c.timestamp.minute for c in result] == [55, 0]

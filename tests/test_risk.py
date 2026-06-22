@@ -60,3 +60,26 @@ def test_test_account_position_limit_is_three() -> None:
     )
     assert not decision.approved
 
+
+def test_exchange_maximum_leverage_is_used_when_enabled() -> None:
+    config = RiskConfig(
+        risk_per_trade=0.05,
+        maximum_symbol_risk=0.05,
+        daily_loss_limit=0.25,
+        maximum_drawdown=0.50,
+        test_maximum_positions=3,
+        production_maximum_positions=5,
+        test_equity_threshold=200,
+        minimum_leverage=2,
+        maximum_leverage=125,
+        maximum_consecutive_losses=4,
+        use_exchange_max_leverage=True,
+    )
+    decision = RiskManager(config).evaluate_entry(
+        account(equity=1000, day_start_equity=1000, equity_high_watermark=1000),
+        Signal("ALTUSDT", Side.LONG, entry=10, stop=9.5, confidence=0.8, reason="test"),
+        symbol_maximum_leverage=75,
+    )
+    assert decision.approved
+    assert decision.leverage == 75
+    assert decision.quantity == 100
