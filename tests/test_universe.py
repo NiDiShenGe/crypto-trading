@@ -37,3 +37,7 @@ def test_rejects_wide_spread_and_stablecoin() -> None:
 def test_intraday_range_ratio() -> None:
     value = market(high_24h=110, low_24h=90).intraday_range_ratio
     assert value == 0.2
+
+
+def test_rejects_rwa_contract() -> None:
+    assert not is_eligible(market(is_rwa=True), CONFIG)

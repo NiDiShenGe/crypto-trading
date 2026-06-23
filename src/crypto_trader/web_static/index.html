@@ -23,10 +23,10 @@
 
     <main>
       <section class="metrics">
-        <article><span>纸面现金</span><strong id="cash">—</strong><small>USDT</small></article>
+        <article><span>当前权益</span><strong id="equity">—</strong><small id="cash">可用现金 —</small></article>
         <article><span>已实现盈亏</span><strong id="pnl">—</strong><small id="return">—</small></article>
+        <article><span>浮动盈亏</span><strong id="unrealized">—</strong><small>实时持仓估值</small></article>
         <article><span>当前持仓</span><strong id="position-count">—</strong><small id="position-limit">上限 —</small></article>
-        <article><span>胜率</span><strong id="win-rate">—</strong><small id="win-loss">—</small></article>
       </section>
 
       <section class="grid">
@@ -58,10 +58,18 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>时间</th><th>币种</th><th>方向</th><th>事件</th><th>价格</th><th>数量</th><th>盈亏</th></tr></thead>
-              <tbody id="fills"><tr><td colspan="7" class="empty-cell">暂无成交</td></tr></tbody>
+              <thead><tr><th>时间</th><th>币种</th><th>事件</th><th>价格</th><th>盈亏</th><th>实际R</th><th>峰值R</th><th>MFE / MAE</th><th>费用</th><th>持仓</th></tr></thead>
+              <tbody id="fills"><tr><td colspan="10" class="empty-cell">暂无成交</td></tr></tbody>
             </table>
           </div>
+        </article>
+
+        <article class="panel wide">
+          <div class="panel-head">
+            <div><p class="eyebrow">STRATEGY LAB</p><h2>策略独立表现</h2></div>
+            <span class="badge">PAPER</span>
+          </div>
+          <div id="strategy-cards" class="strategy-cards"></div>
         </article>
 
         <article class="panel">

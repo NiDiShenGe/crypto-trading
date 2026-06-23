@@ -45,6 +45,29 @@ run.cmd scan
 run.cmd test-email
 ```
 
+`run.cmd scan` 只执行诊断扫描和记录信号，不会开仓；自动纸面交易仅由持续运行的 `run.cmd` 进程执行。
+
+回测单个币种（默认90天，可设置为180天）：
+
+```cmd
+run.cmd backtest BTCUSDT 90
+```
+
+批量缓存历史数据并优化单个策略：
+
+```cmd
+run.cmd fetch-history 30 ENAUSDT BICOUSDT WLDUSDT SUIUSDT
+run.cmd optimize trend_pullback 30 ENAUSDT BICOUSDT WLDUSDT SUIUSDT
+```
+
+使用本地缓存对三套策略执行滚动、逐币剔除和成本压力验证：
+
+```cmd
+run.cmd validate-strategies 180 HYPEUSDT SYNUSDT ALLOUSDT UBUSDT TNSRUSDT LABUSDT DEXEUSDT TAOUSDT LAYERUSDT BEATUSDT TRUMPUSDT RESOLVUSDT
+```
+
+详细方法和当前结果见 `docs/STRATEGY_VALIDATION.md`。
+
 启动本机 Web 控制台：
 
 ```cmd

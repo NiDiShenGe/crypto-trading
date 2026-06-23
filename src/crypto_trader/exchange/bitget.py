@@ -9,6 +9,7 @@ import os
 import socket
 import time
 from datetime import UTC, datetime
+from datetime import timedelta
 from urllib import error, parse, request
 
 from ..domain import Candle, Market
@@ -154,6 +155,95 @@ class BitgetClient:
         ]
         return sorted(result, key=lambda candle: candle.timestamp)
 
+    def history_candles(
+        self,
+        symbol: str,
+        granularity: str,
+        start: datetime,
+        end: datetime,
+        *,
+        product_type: str = "USDT-FUTURES",
+    ) -> list[Candle]:
+        result: dict[int, Candle] = {}
+        chunk_start = start.astimezone(UTC)
+        final_end = end.astimezone(UTC)
+        while chunk_start < final_end:
+            chunk_end = min(chunk_start + timedelta(days=89), final_end)
+            cursor_end = chunk_end
+            while cursor_end > chunk_start:
+                payload = self.public_get(
+                    "/api/v2/mix/market/history-candles",
+                    {
+                        "symbol": symbol,
+                        "productType": product_type,
+                        "granularity": granularity,
+                        "startTime": str(int(chunk_start.timestamp() * 1000)),
+                        "endTime": str(int(cursor_end.timestamp() * 1000)),
+                        "limit": "200",
+                    },
+                )
+                rows = payload["data"]
+                if not rows:
+                    break
+                oldest = cursor_end
+                for row in rows:
+                    timestamp_ms = int(row[0])
+                    candle = Candle(
+                        timestamp=datetime.fromtimestamp(
+                            timestamp_ms / 1000, tz=UTC
+                        ),
+                        open=float(row[1]),
+                        high=float(row[2]),
+                        low=float(row[3]),
+                        close=float(row[4]),
+                        volume=float(row[5]),
+                    )
+                    result[timestamp_ms] = candle
+                    oldest = min(oldest, candle.timestamp)
+                if len(rows) < 200 or oldest <= chunk_start:
+                    break
+                cursor_end = oldest - timedelta(milliseconds=1)
+                time.sleep(0.06)
+            chunk_start = chunk_end
+        return [result[key] for key in sorted(result)]
+
+    def funding_history(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        *,
+        product_type: str = "USDT-FUTURES",
+    ) -> list[tuple[datetime, float]]:
+        result: list[tuple[datetime, float]] = []
+        for page in range(1, 100):
+            payload = self.public_get(
+                "/api/v2/mix/market/history-fund-rate",
+                {
+                    "symbol": symbol,
+                    "productType": product_type,
+                    "pageSize": "100",
+                    "pageNo": str(page),
+                },
+            )
+            rows = payload["data"]
+            if not rows:
+                break
+            reached_start = False
+            for row in rows:
+                timestamp = datetime.fromtimestamp(
+                    int(row["fundingTime"]) / 1000, tz=UTC
+                )
+                if timestamp < start:
+                    reached_start = True
+                    continue
+                if timestamp <= end:
+                    result.append((timestamp, float(row["fundingRate"])))
+            if reached_start or len(rows) < 100:
+                break
+            time.sleep(0.06)
+        return sorted(result)
+
     def markets(self, product_type: str = "USDT-FUTURES") -> list[Market]:
         now_ms = int(time.time() * 1000)
         contracts = {
@@ -191,6 +281,8 @@ class BitgetClient:
                     maximum_leverage=max(
                         1, int(self._number(contract.get("maxLever")) or 1)
                     ),
+                    is_rwa=str(contract.get("isRwa", "")).lower()
+                    in {"true", "1", "yes", "y"},
                 )
             )
         return result

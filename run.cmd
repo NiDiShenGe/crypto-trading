@@ -14,7 +14,7 @@ set "PYTHONPATH=%CD%\src"
 if "%~1"=="" (
     python -m crypto_trader run
 ) else (
-    python -m crypto_trader %1
+    python -m crypto_trader %*
 )
 
 if errorlevel 1 (

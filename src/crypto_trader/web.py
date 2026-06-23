@@ -11,6 +11,11 @@ from .storage import EventStore
 
 
 STATIC_DIR = Path(__file__).with_name("web_static")
+STRATEGY_NAMES = {
+    "breakout_retest": "突破回踩",
+    "trend_pullback": "趋势回调延续",
+    "volatility_squeeze": "波动压缩爆发",
+}
 
 
 def dashboard_data(store: EventStore) -> dict:
@@ -47,11 +52,79 @@ def dashboard_data(store: EventStore) -> dict:
     latest_scan = scans[0] if scans else None
     cash = float(broker.get("cash", initial_equity))
     positions = broker.get("positions", [])
+    enriched_positions: list[dict] = []
+    unrealized_pnl = 0.0
+    open_margin = 0.0
+    for raw in positions:
+        position = dict(raw)
+        current_price = float(position.get("current_price") or position["entry_price"])
+        entry_price = float(position["entry_price"])
+        quantity = float(position["quantity"])
+        direction = 1 if position["side"] == "long" else -1
+        position_pnl = (current_price - entry_price) * quantity * direction
+        margin = entry_price * quantity / max(float(position["leverage"]), 1)
+        position["current_price"] = current_price
+        position["unrealized_pnl"] = position_pnl
+        position["unrealized_return"] = position_pnl / margin if margin else 0
+        position["margin"] = margin
+        enriched_positions.append(position)
+        unrealized_pnl += position_pnl
+        open_margin += margin
+    current_equity = cash + open_margin + unrealized_pnl
     maximum_positions = (
         settings.risk.test_maximum_positions
         if initial_equity < settings.risk.test_equity_threshold
         else settings.risk.production_maximum_positions
     )
+    strategy_performance: dict[str, dict] = {}
+    for strategy_id, name in STRATEGY_NAMES.items():
+        strategy_signals = [
+            item for item in signals
+            if item["payload"].get("strategy_id", "breakout_retest") == strategy_id
+        ]
+        exits = [
+            item for item in fills
+            if item["payload"].get("strategy_id", "breakout_retest") == strategy_id
+            and item["payload"].get("reason") != "paper entry"
+        ]
+        pnls = [float(item["payload"].get("realized_pnl", 0)) for item in exits]
+        positive = sum(value for value in pnls if value > 0)
+        negative = -sum(value for value in pnls if value < 0)
+        realized_rs = [
+            float(item["payload"].get("realized_r", 0))
+            for item in exits
+            if item["payload"].get("realized_r") is not None
+        ]
+        candidates = (
+            (latest_scan or {}).get("payload", {})
+            .get("strategy_candidates", {})
+            .get(strategy_id, [])
+        )
+        if not isinstance(candidates, list):
+            candidates = []
+        strategy_performance[strategy_id] = {
+            "name": name,
+            "automatic_trading": settings.strategies.get(
+                strategy_id
+            ).automatic_trading if strategy_id in settings.strategies else True,
+            "signals": len(strategy_signals),
+            "selected_signals": sum(
+                bool(item["payload"].get("selected", True))
+                for item in strategy_signals
+            ),
+            "exits": len(exits),
+            "net_pnl": sum(pnls),
+            "win_rate": (
+                sum(value > 0 for value in pnls) / len(pnls) if pnls else 0
+            ),
+            "average_r": (
+                sum(realized_rs) / len(realized_rs) if realized_rs else 0
+            ),
+            "profit_factor": (
+                positive / negative if negative > 0 else (None if positive == 0 else 999)
+            ),
+            "candidates": candidates,
+        }
 
     return {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -59,6 +132,8 @@ def dashboard_data(store: EventStore) -> dict:
         "account": {
             "initial_equity": initial_equity,
             "cash": cash,
+            "current_equity": current_equity,
+            "unrealized_pnl": unrealized_pnl,
             "realized_pnl": realized_pnl,
             "return_pct": realized_pnl / initial_equity if initial_equity else 0,
             "open_positions": len(positions),
@@ -66,7 +141,7 @@ def dashboard_data(store: EventStore) -> dict:
             "high_watermark": runtime.get("equity_high_watermark", initial_equity),
             "consecutive_losses": runtime.get("consecutive_losses", 0),
         },
-        "positions": positions,
+        "positions": enriched_positions,
         "latest_scan": latest_scan,
         "fills": fills[:30],
         "signals": signals[:30],
@@ -77,6 +152,7 @@ def dashboard_data(store: EventStore) -> dict:
             "losses": losses,
             "win_rate": wins / (wins + losses) if wins + losses else 0,
         },
+        "strategy_performance": strategy_performance,
     }
 
 

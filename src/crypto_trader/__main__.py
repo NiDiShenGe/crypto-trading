@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import time
 from datetime import UTC, datetime, timedelta
 
 from .config import load_settings
+from .backtest import MultiStrategyBacktester
+from .history_cache import HistoricalDataCache
+from .optimization import Dataset, StrategyOptimizer
+from .validation import validate_cached_strategies
 from .env import load_env
 from .exchange.bitget import BitgetClient
 from .execution import PaperTradingEngine
@@ -41,8 +46,15 @@ def main() -> None:
     print(f"email alerts: {'configured' if email_configured else 'not configured'}")
 
     command = sys.argv[1].lower() if len(sys.argv) > 1 else "run"
-    if command not in {"run", "scan", "test-email", "web"}:
-        raise SystemExit("Usage: python -m crypto_trader [run|scan|test-email|web]")
+    if command not in {
+        "run", "scan", "test-email", "web", "backtest",
+        "fetch-history", "optimize", "validate-strategies",
+    }:
+        raise SystemExit(
+            "Usage: python -m crypto_trader "
+            "[run|scan|test-email|web|backtest|fetch-history|"
+            "optimize|validate-strategies]"
+        )
 
     if command == "test-email":
         if not email_configured:
@@ -55,6 +67,107 @@ def main() -> None:
         return
     if command == "web":
         serve()
+        return
+    if command == "backtest":
+        if len(sys.argv) < 3:
+            raise SystemExit(
+                "Usage: python -m crypto_trader backtest "
+                "SYMBOL [DAYS] [STRATEGY]"
+            )
+        symbol = sys.argv[2].upper()
+        days = int(sys.argv[3]) if len(sys.argv) > 3 else 90
+        strategy_ids = (
+            {sys.argv[4]} if len(sys.argv) > 4 else None
+        )
+        client = BitgetClient(demo_mode=True, timeout=20)
+        cache = HistoricalDataCache()
+        print(f"loading {symbol} 5m history for {days} days...")
+        candles, funding = cache.load_or_fetch(client, symbol, days)
+        benchmark, _ = (
+            (candles, funding)
+            if symbol == "BTCUSDT"
+            else cache.load_or_fetch(client, "BTCUSDT", days)
+        )
+        result = MultiStrategyBacktester(settings, strategy_ids).run(
+            symbol, candles, funding, benchmark_candles=benchmark
+        )
+        summary = result.summary()
+        store.append("backtest_result", summary, symbol)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+    if command == "fetch-history":
+        if len(sys.argv) < 4:
+            raise SystemExit(
+                "Usage: python -m crypto_trader fetch-history DAYS SYMBOL..."
+            )
+        days = int(sys.argv[2])
+        symbols = [symbol.upper() for symbol in sys.argv[3:]]
+        client = BitgetClient(demo_mode=True, timeout=20)
+        cache = HistoricalDataCache()
+        for symbol in symbols:
+            print(f"fetching {symbol} {days}d...")
+            candles, funding = cache.load_or_fetch(
+                client, symbol, days
+            )
+            print(
+                f"{symbol}: candles={len(candles)} funding={len(funding)}"
+            )
+        return
+    if command == "optimize":
+        if len(sys.argv) < 5:
+            raise SystemExit(
+                "Usage: python -m crypto_trader optimize "
+                "STRATEGY DAYS SYMBOL..."
+            )
+        strategy_id = sys.argv[2]
+        days = int(sys.argv[3])
+        symbols = [symbol.upper() for symbol in sys.argv[4:]]
+        client = BitgetClient(demo_mode=True, timeout=20)
+        cache = HistoricalDataCache()
+        datasets = []
+        benchmark_candles, _ = cache.load_or_fetch(
+            client, "BTCUSDT", days
+        )
+        for symbol in symbols:
+            candles, funding = cache.load_or_fetch(
+                client, symbol, days
+            )
+            datasets.append(Dataset(
+                symbol, candles, funding, benchmark_candles
+            ))
+        results = StrategyOptimizer(settings).optimize(
+            strategy_id, datasets
+        )
+        print(json.dumps(
+            [
+                {
+                    "parameters": item.parameters,
+                    "train_score": item.train_score,
+                    "validation_score": item.validation_score,
+                    "train": item.train_metrics,
+                    "validation": item.validation_metrics,
+                }
+                for item in results[:5]
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return
+    if command == "validate-strategies":
+        if len(sys.argv) < 4:
+            raise SystemExit(
+                "Usage: python -m crypto_trader "
+                "validate-strategies DAYS SYMBOL..."
+            )
+        days = int(sys.argv[2])
+        symbols = [
+            symbol.upper() for symbol in sys.argv[3:]
+            if symbol.upper() != "BTCUSDT"
+        ]
+        report = validate_cached_strategies(
+            settings, days, symbols
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return
 
     saved_broker = store.load_state("paper_broker")
@@ -91,7 +204,7 @@ def main() -> None:
     )
 
     if command == "scan":
-        _scan_and_report(scanner, store, engine)
+        _scan_and_report(scanner, store, engine, execute_trades=False)
         return
 
     monitor = BitgetPositionMonitor(engine, store)
@@ -126,8 +239,9 @@ def _scan_and_report(
     scanner: MarketScanner,
     store: EventStore,
     engine: PaperTradingEngine,
+    execute_trades: bool = True,
 ) -> None:
-    result = scanner.scan_once()
+    result = scanner.scan_once(engine.position_symbols())
     store.append(
         "market_scan",
         {
@@ -135,6 +249,11 @@ def _scan_and_report(
             "eligible_markets": result.eligible_markets,
             "scanned_candidates": result.scanned_candidates,
             "signals": len(result.signals),
+            "raw_signals": len(result.all_signals),
+            "strategy_candidates": {
+                name: list(symbols)
+                for name, symbols in result.strategy_candidates.items()
+            },
         },
     )
     stamp = result.scanned_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -142,7 +261,11 @@ def _scan_and_report(
         f"[{stamp}] markets={result.total_markets} eligible={result.eligible_markets} "
         f"scanned={result.scanned_candidates} signals={len(result.signals)}"
     )
-    for signal in result.signals:
+    selected_keys = {
+        (signal.symbol, signal.strategy_id) for signal in result.signals
+    }
+    for signal in result.all_signals or result.signals:
+        selected = (signal.symbol, signal.strategy_id) in selected_keys
         store.append(
             "strategy_signal",
             {
@@ -151,15 +274,20 @@ def _scan_and_report(
                 "stop": signal.stop,
                 "confidence": signal.confidence,
                 "reason": signal.reason,
+                "strategy_id": signal.strategy_id,
+                "score": signal.score,
+                "selected": selected,
             },
             signal.symbol,
         )
-        print(
-            f"SIGNAL {signal.symbol} {signal.side.value.upper()} "
-            f"entry={signal.entry:g} stop={signal.stop:g}"
-        )
+        if selected:
+            print(
+                f"SIGNAL {signal.strategy_id} {signal.symbol} "
+                f"{signal.side.value.upper()} entry={signal.entry:g} "
+                f"stop={signal.stop:g} score={signal.score:.3f}"
+            )
 
-    fills = engine.process(result)
+    fills = engine.process(result) if execute_trades else []
     for fill in fills:
         print(
             f"PAPER FILL {fill.symbol} {fill.reason} qty={fill.quantity:g} "

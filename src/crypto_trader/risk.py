@@ -30,7 +30,10 @@ class RiskManager:
             return TradingMode.REDUCE_ONLY
         if daily_loss >= self.config.daily_loss_limit:
             return TradingMode.REDUCE_ONLY
-        if account.consecutive_losses >= self.config.maximum_consecutive_losses:
+        if (
+            self.config.enable_consecutive_loss_limit
+            and account.consecutive_losses >= self.config.maximum_consecutive_losses
+        ):
             return TradingMode.REDUCE_ONLY
         return TradingMode.NORMAL
 

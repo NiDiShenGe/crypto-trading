@@ -40,6 +40,7 @@ class Market:
     high_24h: float = 0.0
     low_24h: float = 0.0
     maximum_leverage: int = 1
+    is_rwa: bool = False
 
     @property
     def spread_ratio(self) -> float:
@@ -60,6 +61,10 @@ class Signal:
     stop: float
     confidence: float
     reason: str
+    breakout_level: float = 0.0
+    strategy_id: str = "breakout_retest"
+    score: float = 0.0
+    invalidation_level: float = 0.0
 
     @property
     def stop_distance(self) -> float:

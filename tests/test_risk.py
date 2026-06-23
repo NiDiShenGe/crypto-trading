@@ -83,3 +83,28 @@ def test_exchange_maximum_leverage_is_used_when_enabled() -> None:
     assert decision.approved
     assert decision.leverage == 75
     assert decision.quantity == 100
+
+
+def test_consecutive_loss_gate_can_be_disabled_for_testing() -> None:
+    config = RiskConfig(
+        risk_per_trade=0.05,
+        maximum_symbol_risk=0.05,
+        daily_loss_limit=0.25,
+        maximum_drawdown=0.50,
+        test_maximum_positions=3,
+        production_maximum_positions=5,
+        test_equity_threshold=200,
+        minimum_leverage=2,
+        maximum_leverage=125,
+        maximum_consecutive_losses=4,
+        enable_consecutive_loss_limit=False,
+    )
+    mode = RiskManager(config).trading_mode(
+        account(
+            equity=1000,
+            day_start_equity=1000,
+            equity_high_watermark=1000,
+            consecutive_losses=20,
+        )
+    )
+    assert mode is TradingMode.NORMAL
