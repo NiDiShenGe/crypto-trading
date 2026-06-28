@@ -11,6 +11,7 @@ const exitLabel = (reason) => ({
   "breakeven_stop": "保本止损",
   "trailing_stop": "趋势跟踪退出",
   "failed_breakout": "突破失败",
+  "liangyi_filter_exit": "两仪四象过滤退出",
   "no_progress_exit": "6根K线无进展",
   "stop loss": "旧版止损"
 }[reason] || reason || "—");

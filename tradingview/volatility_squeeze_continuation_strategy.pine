@@ -1,0 +1,204 @@
+//@version=5
+strategy("Crypto System - Volatility Squeeze Continuation / 波动压缩延续",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=1000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=1,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// This script mirrors the active volatility_squeeze branch:
+// 4H trend + contracting 1H pullback + 1H volume-backed continuation.
+// Recommended chart timeframe: 1H.
+
+// ----- Core parameters from current config -----
+pullbackBars = input.int(6, "1H pullback bars")
+priorBars = input.int(12, "Prior comparison bars")
+confirmationLookback = input.int(3, "Confirmation lookback")
+emaFastPeriod = input.int(20, "1H EMA fast")
+atrPeriod = input.int(14, "ATR period")
+stopAtrMultiple = input.float(2.0, "Initial stop ATR multiple", step=0.1)
+atrBuffer = input.float(0.5, "Structure stop ATR buffer", step=0.1)
+minimumAtrRatio = input.float(0.003, "Minimum ATR / close", step=0.001)
+minimumTrendEfficiency = input.float(0.25, "Minimum 4H efficiency", step=0.01)
+confirmationVolumeMultiplier = input.float(1.5, "Confirmation volume multiplier", step=0.1)
+minimumBodyAtr = input.float(0.50, "Minimum confirmation body / ATR", step=0.05)
+minimumSignalScore = input.float(0.75, "Minimum signal score", step=0.01)
+rangeContractionRatio = input.float(1.2, "Pullback range contraction ratio", step=0.1)
+pullbackVolumeRatio = input.float(1.0, "Pullback volume ratio", step=0.1)
+maximumTrendAgeBars = input.int(24, "Maximum 4H trend age")
+
+// ----- Two-Yi/Four-Xiang filter currently used by the bot -----
+useLiangyiFilter = input.bool(true, "Use 4H 两仪四象 direction filter")
+liangyiTf = input.timeframe("240", "两仪四象 timeframe")
+liangyiN1 = input.int(20, "两仪 N1")
+liangyiN2 = input.int(20, "两仪 N2")
+liangyiMomentumEma = input.int(20, "两仪 momentum EMA")
+
+// ----- Exit parameters from active runtime -----
+breakevenAtR = input.float(0.8, "Move stop after R", step=0.1)
+firstTakeProfitAtR = input.float(1.5, "First take-profit R", step=0.1)
+firstTakeProfitPercent = input.float(50, "First take-profit position %", step=1)
+trailingAtrMultiple = input.float(2.0, "Trailing ATR multiple", step=0.1)
+failedBreakoutCloses = input.int(1, "Failed breakout confirmation closes")
+useLiangyiExit = input.bool(true, "Exit if 4H 两仪反向 2 bars before 1R")
+liangyiExitBars = input.int(2, "两仪反向 exit bars")
+
+f_efficiency(src, n) =>
+    path = ta.sum(math.abs(src - src[1]), n)
+    span = math.max(ta.highest(src, n) - ta.lowest(src, n), math.abs(src - src[n]))
+    path > 0 ? span / path : 0.0
+
+f_age(cond) =>
+    bars = ta.barssince(not cond)
+    na(bars) ? 100000 : bars
+
+f_liangyiMomentum(src, vol, n1, n2, emaPeriod) =>
+    ef = f_efficiency(src, n1)
+    efma = ta.ema(ef, n1)
+    merRaw = int(math.round(n1 - (efma - 0.5) * n2))
+    mer = math.max(3, math.min(n1 + n2, merRaw))
+    ly = 0.0
+    for i = 0 to 80
+        if i < mer
+            ly += (src[i] - src[i + 1]) * vol[i]
+    ta.ema(ly, emaPeriod)
+
+f_fourFast() =>
+    ta.ema(close, 10)
+
+f_fourSlow() =>
+    ta.ema(close, 30)
+
+f_fourAtr() =>
+    ta.atr(atrPeriod)
+
+f_fourEfficiency() =>
+    f_efficiency(close, 10)
+
+fourFast = request.security(syminfo.tickerid, "240", f_fourFast(), barmerge.gaps_off, barmerge.lookahead_off)
+fourSlow = request.security(syminfo.tickerid, "240", f_fourSlow(), barmerge.gaps_off, barmerge.lookahead_off)
+fourAtr = request.security(syminfo.tickerid, "240", f_fourAtr(), barmerge.gaps_off, barmerge.lookahead_off)
+fourEfficiency = request.security(syminfo.tickerid, "240", f_fourEfficiency(), barmerge.gaps_off, barmerge.lookahead_off)
+fourClose = request.security(syminfo.tickerid, "240", close, barmerge.gaps_off, barmerge.lookahead_off)
+fourFastPast = request.security(syminfo.tickerid, "240", ta.ema(close, 10)[2], barmerge.gaps_off, barmerge.lookahead_off)
+fourSlowPast = request.security(syminfo.tickerid, "240", ta.ema(close, 30)[2], barmerge.gaps_off, barmerge.lookahead_off)
+fourBullAge = request.security(syminfo.tickerid, "240", f_age(ta.ema(close, 10) > ta.ema(close, 30)), barmerge.gaps_off, barmerge.lookahead_off)
+fourBearAge = request.security(syminfo.tickerid, "240", f_age(ta.ema(close, 10) < ta.ema(close, 30)), barmerge.gaps_off, barmerge.lookahead_off)
+
+liangyiMomentum = request.security(syminfo.tickerid, liangyiTf, f_liangyiMomentum(close, volume, liangyiN1, liangyiN2, liangyiMomentumEma), barmerge.gaps_off, barmerge.lookahead_off)
+liangyiLong = liangyiMomentum > 0
+liangyiShort = liangyiMomentum < 0
+
+hourlyFast = ta.ema(close, emaFastPeriod)
+hourlyPreviousFast = hourlyFast[1]
+hourlyAtr = ta.atr(atrPeriod)
+atrRatio = hourlyAtr / close
+
+pullbackRange = ta.sma(high[1] - low[1], pullbackBars)
+priorRange = ta.sma(high[pullbackBars + 1] - low[pullbackBars + 1], priorBars)
+pullbackVolume = ta.sma(volume[1], pullbackBars)
+priorVolume = ta.sma(volume[pullbackBars + 1], priorBars)
+rangeRatio = pullbackRange / math.max(priorRange, syminfo.mintick)
+volumeRatio = pullbackVolume / math.max(priorVolume, syminfo.mintick)
+contracted = rangeRatio <= rangeContractionRatio and volumeRatio <= pullbackVolumeRatio
+
+recentHigh = ta.highest(high[1], confirmationLookback)
+recentLow = ta.lowest(low[1], confirmationLookback)
+pullbackLow = ta.lowest(low[1], pullbackBars)
+pullbackHigh = ta.highest(high[1], pullbackBars)
+bodyAtr = math.abs(close - open) / math.max(hourlyAtr, syminfo.mintick)
+confirmationVolumeRatio = volume / math.max(pullbackVolume, syminfo.mintick)
+fourSeparation = math.abs(fourFast - fourSlow) / math.max(fourAtr, syminfo.mintick)
+
+score = math.min(0.50 + math.min(fourSeparation / 3.0 * 0.20, 0.20) + math.min(bodyAtr / 2.0 * 0.15, 0.15) + math.min(confirmationVolumeRatio / 3.0 * 0.15, 0.15), 1.0)
+
+bullishTrend = fourFast > fourSlow and fourFast > fourFastPast and fourSlow >= fourSlowPast and fourClose > fourFast and fourSeparation >= 0.50 and fourEfficiency >= minimumTrendEfficiency and fourBullAge >= 2 and fourBullAge <= maximumTrendAgeBars
+bearishTrend = fourFast < fourSlow and fourFast < fourFastPast and fourSlow <= fourSlowPast and fourClose < fourFast and fourSeparation >= 0.50 and fourEfficiency >= minimumTrendEfficiency and fourBearAge >= 2 and fourBearAge <= maximumTrendAgeBars
+
+bullishPullback = ta.lowest(low[1], pullbackBars) <= hourlyPreviousFast and pullbackLow > fourSlow
+bearishPullback = ta.highest(high[1], pullbackBars) >= hourlyPreviousFast and pullbackHigh < fourSlow
+
+bullishConfirm = close > recentHigh and close > open and close > hourlyFast and bodyAtr >= minimumBodyAtr and confirmationVolumeRatio >= confirmationVolumeMultiplier
+bearishConfirm = close < recentLow and close < open and close < hourlyFast and bodyAtr >= minimumBodyAtr and confirmationVolumeRatio >= confirmationVolumeMultiplier
+
+rawLongSignal = atrRatio >= minimumAtrRatio and contracted and bullishTrend and bullishPullback and bullishConfirm and score >= minimumSignalScore
+rawShortSignal = atrRatio >= minimumAtrRatio and contracted and bearishTrend and bearishPullback and bearishConfirm and score >= minimumSignalScore
+longSignal = rawLongSignal and (not useLiangyiFilter or liangyiLong)
+shortSignal = rawShortSignal and (not useLiangyiFilter or liangyiShort)
+
+var float entryPrice = na
+var float stopPrice = na
+var float initialRisk = na
+var float bestPrice = na
+var float invalidationLevel = na
+var int failureCount = 0
+var int oppositeLiangyiCount = 0
+
+if strategy.position_size == 0
+    failureCount := 0
+    oppositeLiangyiCount := 0
+    entryPrice := na
+    stopPrice := na
+    initialRisk := na
+    bestPrice := na
+    invalidationLevel := na
+
+if strategy.position_size == 0 and longSignal
+    structure = pullbackLow
+    entryPrice := close
+    stopPrice := math.min(structure - hourlyAtr * atrBuffer, close - hourlyAtr * stopAtrMultiple)
+    initialRisk := entryPrice - stopPrice
+    bestPrice := close
+    invalidationLevel := structure
+    strategy.entry("Long", strategy.long)
+
+if strategy.position_size == 0 and shortSignal
+    structure = pullbackHigh
+    entryPrice := close
+    stopPrice := math.max(structure + hourlyAtr * atrBuffer, close + hourlyAtr * stopAtrMultiple)
+    initialRisk := stopPrice - entryPrice
+    bestPrice := close
+    invalidationLevel := structure
+    strategy.entry("Short", strategy.short)
+
+longOpen = strategy.position_size > 0
+shortOpen = strategy.position_size < 0
+
+if longOpen and not na(initialRisk)
+    bestPrice := math.max(bestPrice, high)
+    favorable = bestPrice - entryPrice
+    peakR = favorable / initialRisk
+    dynamicStop = stopPrice
+    if peakR >= breakevenAtR
+        dynamicStop := math.max(dynamicStop, entryPrice)
+        dynamicStop := math.max(dynamicStop, bestPrice - (initialRisk / stopAtrMultiple * trailingAtrMultiple))
+    strategy.exit("Long TP1", "Long", qty_percent=firstTakeProfitPercent, limit=entryPrice + initialRisk * firstTakeProfitAtR)
+    strategy.exit("Long Stop", "Long", stop=dynamicStop)
+    failureCount := close <= invalidationLevel ? failureCount + 1 : 0
+    oppositeLiangyiCount := liangyiShort ? oppositeLiangyiCount + 1 : 0
+    if failureCount >= failedBreakoutCloses or (useLiangyiExit and peakR < 1.0 and oppositeLiangyiCount >= liangyiExitBars)
+        strategy.close("Long", comment=failureCount >= failedBreakoutCloses ? "failed_breakout" : "liangyi_filter_exit")
+
+if shortOpen and not na(initialRisk)
+    bestPrice := math.min(bestPrice, low)
+    favorable = entryPrice - bestPrice
+    peakR = favorable / initialRisk
+    dynamicStop = stopPrice
+    if peakR >= breakevenAtR
+        dynamicStop := math.min(dynamicStop, entryPrice)
+        dynamicStop := math.min(dynamicStop, bestPrice + (initialRisk / stopAtrMultiple * trailingAtrMultiple))
+    strategy.exit("Short TP1", "Short", qty_percent=firstTakeProfitPercent, limit=entryPrice - initialRisk * firstTakeProfitAtR)
+    strategy.exit("Short Stop", "Short", stop=dynamicStop)
+    failureCount := close >= invalidationLevel ? failureCount + 1 : 0
+    oppositeLiangyiCount := liangyiLong ? oppositeLiangyiCount + 1 : 0
+    if failureCount >= failedBreakoutCloses or (useLiangyiExit and peakR < 1.0 and oppositeLiangyiCount >= liangyiExitBars)
+        strategy.close("Short", comment=failureCount >= failedBreakoutCloses ? "failed_breakout" : "liangyi_filter_exit")
+
+plot(hourlyFast, "1H EMA 20", color=color.orange)
+plot(fourFast, "4H EMA 10", color=color.new(color.green, 30))
+plot(fourSlow, "4H EMA 30", color=color.new(color.blue, 30))
+plotshape(longSignal, title="Long signal", style=shape.triangleup, color=color.lime, size=size.tiny, location=location.belowbar)
+plotshape(shortSignal, title="Short signal", style=shape.triangledown, color=color.red, size=size.tiny, location=location.abovebar)

@@ -1,0 +1,166 @@
+//@version=5
+strategy("Crypto System - Breakout Retest / 突破回踩",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=1000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=1,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// This script mirrors the project's breakout_retest strategy as closely as Pine allows.
+// Recommended chart timeframe: 2H.
+
+// ----- Core parameters from config/settings.toml -----
+breakoutLookback = input.int(20, "Donchian breakout lookback")
+volumeLookback = input.int(20, "Volume lookback")
+volumeMultiplier = input.float(1.3, "Breakout volume multiplier", step=0.1)
+emaFastPeriod = input.int(10, "Trend EMA fast")
+emaSlowPeriod = input.int(30, "Trend EMA slow")
+atrPeriod = input.int(14, "ATR period")
+stopAtrMultiple = input.float(2.0, "Initial stop ATR multiple", step=0.1)
+minimumAtrRatio = input.float(0.003, "Minimum ATR / close", step=0.001)
+minimumTrendEfficiency = input.float(0.20, "Minimum trend efficiency", step=0.01)
+minimumBreakoutBodyAtr = input.float(0.30, "Minimum breakout body / ATR", step=0.05)
+consolidationBars = input.int(8, "Consolidation bars")
+maximumConsolidationAtr = input.float(4.0, "Maximum consolidation width / ATR", step=0.1)
+minimumPenetrationAtr = input.float(0.10, "Minimum breakout penetration / ATR", step=0.05)
+minimumScore = input.float(0.85, "Minimum signal score", step=0.01)
+
+// ----- Two-Yi/Four-Xiang filter currently used by the bot -----
+useLiangyiFilter = input.bool(true, "Use 4H 两仪四象 direction filter")
+liangyiTf = input.timeframe("240", "两仪四象 timeframe")
+liangyiN1 = input.int(20, "两仪 N1")
+liangyiN2 = input.int(20, "两仪 N2")
+liangyiMomentumEma = input.int(20, "两仪 momentum EMA")
+
+// ----- Exit parameters from active strategy runtime -----
+breakevenAtR = input.float(0.8, "Move stop after R", step=0.1)
+firstTakeProfitAtR = input.float(1.5, "First take-profit R", step=0.1)
+firstTakeProfitPercent = input.float(50, "First take-profit position %", step=1)
+trailingAtrMultiple = input.float(2.0, "Trailing ATR multiple", step=0.1)
+failedBreakoutCloses = input.int(1, "Failed breakout confirmation closes")
+useLiangyiExit = input.bool(true, "Exit if 4H 两仪反向 2 bars before 1R")
+liangyiExitBars = input.int(2, "两仪反向 exit bars")
+
+f_efficiency(src, n) =>
+    path = ta.sum(math.abs(src - src[1]), n)
+    span = math.max(ta.highest(src, n) - ta.lowest(src, n), math.abs(src - src[n]))
+    path > 0 ? span / path : 0.0
+
+f_liangyiMomentum(src, vol, n1, n2, emaPeriod) =>
+    ef = f_efficiency(src, n1)
+    efma = ta.ema(ef, n1)
+    merRaw = int(math.round(n1 - (efma - 0.5) * n2))
+    mer = math.max(3, math.min(n1 + n2, merRaw))
+    ly = 0.0
+    for i = 0 to 80
+        if i < mer
+            ly += (src[i] - src[i + 1]) * vol[i]
+    ta.ema(ly, emaPeriod)
+
+liangyiMomentum = request.security(syminfo.tickerid, liangyiTf, f_liangyiMomentum(close, volume, liangyiN1, liangyiN2, liangyiMomentumEma), barmerge.gaps_off, barmerge.lookahead_off)
+liangyiLong = liangyiMomentum > 0
+liangyiShort = liangyiMomentum < 0
+
+atrValue = ta.atr(atrPeriod)
+atrRatio = atrValue / close
+fast = ta.ema(close, emaFastPeriod)
+slow = ta.ema(close, emaSlowPeriod)
+previousFast = fast[2]
+averageVolume = ta.sma(volume[1], volumeLookback)
+volumeConfirmed = volume >= averageVolume * volumeMultiplier
+trendEfficiency = f_efficiency(close, 10)
+bodyAtr = math.abs(close - open) / math.max(atrValue, syminfo.mintick)
+candleRange = math.max(high - low, syminfo.mintick)
+closeLocation = (close - low) / candleRange
+previousHigh = ta.highest(high[1], breakoutLookback)
+previousLow = ta.lowest(low[1], breakoutLookback)
+consolidationHigh = ta.highest(high[1], consolidationBars)
+consolidationLow = ta.lowest(low[1], consolidationBars)
+consolidationWidthAtr = (consolidationHigh - consolidationLow) / math.max(atrValue, syminfo.mintick)
+consolidated = consolidationWidthAtr <= maximumConsolidationAtr
+penetration = atrValue * minimumPenetrationAtr
+
+longScore = math.min(volume / math.max(averageVolume, syminfo.mintick) / 3.0, 0.6) + math.min(math.abs(fast - slow) / math.max(math.abs(slow), syminfo.mintick) * 10.0, 0.4)
+shortScore = math.min(volume / math.max(averageVolume, syminfo.mintick) / 3.0, 0.6) + math.min(math.abs(slow - fast) / math.max(math.abs(fast), syminfo.mintick) * 10.0, 0.4)
+
+rawLongSignal = volumeConfirmed and consolidated and fast > slow and fast > previousFast and close > previousHigh + penetration and trendEfficiency >= minimumTrendEfficiency and bodyAtr >= minimumBreakoutBodyAtr and closeLocation >= 0.70 and atrRatio >= minimumAtrRatio and longScore >= minimumScore
+rawShortSignal = volumeConfirmed and consolidated and fast < slow and fast < previousFast and close < previousLow - penetration and trendEfficiency >= minimumTrendEfficiency and bodyAtr >= minimumBreakoutBodyAtr and closeLocation <= 0.30 and atrRatio >= minimumAtrRatio and shortScore >= minimumScore
+
+longSignal = rawLongSignal and (not useLiangyiFilter or liangyiLong)
+shortSignal = rawShortSignal and (not useLiangyiFilter or liangyiShort)
+
+var float entryPrice = na
+var float stopPrice = na
+var float initialRisk = na
+var float bestPrice = na
+var float invalidationLevel = na
+var int failureCount = 0
+var int oppositeLiangyiCount = 0
+
+if strategy.position_size == 0
+    failureCount := 0
+    oppositeLiangyiCount := 0
+    entryPrice := na
+    stopPrice := na
+    initialRisk := na
+    bestPrice := na
+    invalidationLevel := na
+
+if strategy.position_size == 0 and longSignal
+    entryPrice := close
+    stopPrice := close - atrValue * stopAtrMultiple
+    initialRisk := entryPrice - stopPrice
+    bestPrice := close
+    invalidationLevel := previousHigh - atrValue * 0.20
+    strategy.entry("Long", strategy.long)
+
+if strategy.position_size == 0 and shortSignal
+    entryPrice := close
+    stopPrice := close + atrValue * stopAtrMultiple
+    initialRisk := stopPrice - entryPrice
+    bestPrice := close
+    invalidationLevel := previousLow + atrValue * 0.20
+    strategy.entry("Short", strategy.short)
+
+longOpen = strategy.position_size > 0
+shortOpen = strategy.position_size < 0
+
+if longOpen and not na(initialRisk)
+    bestPrice := math.max(bestPrice, high)
+    favorable = bestPrice - entryPrice
+    peakR = favorable / initialRisk
+    dynamicStop = stopPrice
+    if peakR >= breakevenAtR
+        dynamicStop := math.max(dynamicStop, entryPrice)
+        dynamicStop := math.max(dynamicStop, bestPrice - (initialRisk / stopAtrMultiple * trailingAtrMultiple))
+    strategy.exit("Long TP1", "Long", qty_percent=firstTakeProfitPercent, limit=entryPrice + initialRisk * firstTakeProfitAtR)
+    strategy.exit("Long Stop", "Long", stop=dynamicStop)
+    failureCount := close <= invalidationLevel ? failureCount + 1 : 0
+    oppositeLiangyiCount := liangyiShort ? oppositeLiangyiCount + 1 : 0
+    if failureCount >= failedBreakoutCloses or (useLiangyiExit and peakR < 1.0 and oppositeLiangyiCount >= liangyiExitBars)
+        strategy.close("Long", comment=failureCount >= failedBreakoutCloses ? "failed_breakout" : "liangyi_filter_exit")
+
+if shortOpen and not na(initialRisk)
+    bestPrice := math.min(bestPrice, low)
+    favorable = entryPrice - bestPrice
+    peakR = favorable / initialRisk
+    dynamicStop = stopPrice
+    if peakR >= breakevenAtR
+        dynamicStop := math.min(dynamicStop, entryPrice)
+        dynamicStop := math.min(dynamicStop, bestPrice + (initialRisk / stopAtrMultiple * trailingAtrMultiple))
+    strategy.exit("Short TP1", "Short", qty_percent=firstTakeProfitPercent, limit=entryPrice - initialRisk * firstTakeProfitAtR)
+    strategy.exit("Short Stop", "Short", stop=dynamicStop)
+    failureCount := close >= invalidationLevel ? failureCount + 1 : 0
+    oppositeLiangyiCount := liangyiLong ? oppositeLiangyiCount + 1 : 0
+    if failureCount >= failedBreakoutCloses or (useLiangyiExit and peakR < 1.0 and oppositeLiangyiCount >= liangyiExitBars)
+        strategy.close("Short", comment=failureCount >= failedBreakoutCloses ? "failed_breakout" : "liangyi_filter_exit")
+
+plot(previousHigh, "Donchian High", color=color.new(color.green, 65))
+plot(previousLow, "Donchian Low", color=color.new(color.red, 65))
+plot(fast, "EMA Fast", color=color.orange)
+plot(slow, "EMA Slow", color=color.blue)
+plotshape(longSignal, title="Long signal", style=shape.triangleup, color=color.lime, size=size.tiny, location=location.belowbar)
+plotshape(shortSignal, title="Short signal", style=shape.triangledown, color=color.red, size=size.tiny, location=location.abovebar)

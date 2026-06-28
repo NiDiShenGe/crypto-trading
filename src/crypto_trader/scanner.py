@@ -9,7 +9,10 @@ from .config import Settings, StrategyRuntimeConfig
 from .domain import Market, Signal
 from .exchange.bitget import BitgetClient
 from .indicators import ema
-from .strategies import TrendPullbackStrategy, VolatilitySqueezeStrategy
+from .strategies import (
+    AdaptiveLiangyiSixiangStrategy,
+    VolatilitySqueezeStrategy,
+)
 from .strategy import BreakoutRetestStrategy
 from .universe import select_markets
 
@@ -25,6 +28,8 @@ class ScanResult:
     maximum_leverages: dict[str, int] = field(default_factory=dict)
     closed_prices: dict[str, float] = field(default_factory=dict)
     closed_candle_times: dict[str, datetime] = field(default_factory=dict)
+    liangyi_directions: dict[str, str] = field(default_factory=dict)
+    liangyi_candle_times: dict[str, datetime] = field(default_factory=dict)
     all_signals: tuple[Signal, ...] = ()
     strategy_candidates: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
@@ -39,22 +44,22 @@ class MarketScanner:
                 "breakout_retest",
                 StrategyRuntimeConfig(candidate_limit=20, priority=1),
             ),
-            "trend_pullback": settings.strategies.get(
-                "trend_pullback",
-                StrategyRuntimeConfig(candidate_limit=30, priority=2),
-            ),
             "volatility_squeeze": settings.strategies.get(
                 "volatility_squeeze",
                 StrategyRuntimeConfig(candidate_limit=30, priority=3),
             ),
+            "adaptive_liangyi_sixiang": settings.strategies.get(
+                "adaptive_liangyi_sixiang",
+                StrategyRuntimeConfig(candidate_limit=20, priority=4),
+            ),
         }
-        self.trend_pullback = TrendPullbackStrategy(
-            settings.strategy,
-            self._strategy_configs["trend_pullback"],
-        )
         self.volatility_squeeze = VolatilitySqueezeStrategy(
             settings.strategy,
             self._strategy_configs["volatility_squeeze"],
+        )
+        self.adaptive_liangyi_sixiang = AdaptiveLiangyiSixiangStrategy(
+            settings.strategy,
+            self._strategy_configs["adaptive_liangyi_sixiang"],
         )
         self._confirmed_listing_symbols: set[str] = set()
         self._listing_age_checked: set[str] = set()
@@ -64,8 +69,8 @@ class MarketScanner:
         markets = self._resolve_unknown_listing_ages(markets)
         eligible = select_markets(markets, self.settings.universe)
         breakout_config = self._strategy_configs["breakout_retest"]
-        pullback_config = self._strategy_configs["trend_pullback"]
         squeeze_config = self._strategy_configs["volatility_squeeze"]
+        liangyi_config = self._strategy_configs["adaptive_liangyi_sixiang"]
         breakout_candidates = self._high_volatility_candidates(eligible)[
             :breakout_config.candidate_limit
         ]
@@ -85,13 +90,15 @@ class MarketScanner:
         all_signals: list[Signal] = []
         closed_prices: dict[str, float] = {}
         closed_candle_times: dict[str, datetime] = {}
+        liangyi_directions: dict[str, str] = {}
+        liangyi_candle_times: dict[str, datetime] = {}
         candle_cache: dict[str, tuple[list, list]] = {}
         for market in analysis_by_symbol.values():
             signal_candles = closed_candles(
                 self.client.candles(market.symbol, "5m", limit=500), 300
             )
             trend_candles = closed_candles(
-                self.client.candles(market.symbol, "1H", limit=250), 3600
+                self.client.candles(market.symbol, "1H", limit=320), 3600
             )
             candle_cache[market.symbol] = (signal_candles, trend_candles)
             if signal_candles:
@@ -100,9 +107,6 @@ class MarketScanner:
                     signal_candles[-1].timestamp + timedelta(seconds=300)
                 )
 
-        pullback_candidates = self._rank_trend_candidates(
-            list(analysis_by_symbol.values()), candle_cache
-        )[:pullback_config.candidate_limit]
         squeeze_candidates = sorted(
             analysis_by_symbol.values(),
             key=lambda market: (
@@ -116,6 +120,14 @@ class MarketScanner:
             ),
             reverse=True,
         )[:squeeze_config.candidate_limit]
+        liangyi_candidates = sorted(
+            analysis_by_symbol.values(),
+            key=lambda market: self.adaptive_liangyi_sixiang.setup_score(
+                candle_cache[market.symbol][0],
+                candle_cache[market.symbol][1],
+            ),
+            reverse=True,
+        )[:liangyi_config.candidate_limit]
 
         if breakout_config.enabled:
             for market in breakout_candidates:
@@ -123,17 +135,25 @@ class MarketScanner:
                     market.symbol, *candle_cache[market.symbol]
                 )
                 if signal:
-                    all_signals.append(signal)
-        if pullback_config.enabled:
-            for market in pullback_candidates:
-                signal = self.trend_pullback.evaluate(
-                    market.symbol, *candle_cache[market.symbol]
-                )
+                    signal = self._liangyi_quality_filter(
+                        signal, candle_cache[market.symbol]
+                    )
                 if signal:
                     all_signals.append(signal)
         if squeeze_config.enabled:
             for market in squeeze_candidates:
                 signal = self.volatility_squeeze.evaluate(
+                    market.symbol, *candle_cache[market.symbol]
+                )
+                if signal:
+                    signal = self._liangyi_quality_filter(
+                        signal, candle_cache[market.symbol]
+                    )
+                if signal:
+                    all_signals.append(signal)
+        if liangyi_config.enabled:
+            for market in liangyi_candidates:
+                signal = self.adaptive_liangyi_sixiang.evaluate(
                     market.symbol, *candle_cache[market.symbol]
                 )
                 if signal:
@@ -168,11 +188,21 @@ class MarketScanner:
             candles = closed_candles(
                 self.client.candles(symbol, "5m", limit=10), 300
             )
+            trend_candles = closed_candles(
+                self.client.candles(symbol, "1H", limit=320), 3600
+            )
             if candles:
                 closed_prices[symbol] = candles[-1].close
                 closed_candle_times[symbol] = (
                     candles[-1].timestamp + timedelta(seconds=300)
                 )
+            candle_cache[symbol] = (candles, trend_candles)
+        for symbol, candles in candle_cache.items():
+            direction = self._liangyi_direction(candles)
+            if direction is not None:
+                side, candle_time = direction
+                liangyi_directions[symbol] = side.value
+                liangyi_candle_times[symbol] = candle_time
         return ScanResult(
             scanned_at=datetime.now(UTC),
             total_markets=len(markets),
@@ -189,11 +219,15 @@ class MarketScanner:
             },
             closed_prices=closed_prices,
             closed_candle_times=closed_candle_times,
+            liangyi_directions=liangyi_directions,
+            liangyi_candle_times=liangyi_candle_times,
             all_signals=tuple(all_signals),
             strategy_candidates={
                 "breakout_retest": tuple(m.symbol for m in breakout_candidates),
-                "trend_pullback": tuple(m.symbol for m in pullback_candidates),
                 "volatility_squeeze": tuple(m.symbol for m in squeeze_candidates),
+                "adaptive_liangyi_sixiang": tuple(
+                    m.symbol for m in liangyi_candidates
+                ),
             },
         )
 
@@ -278,6 +312,40 @@ class MarketScanner:
             ):
                 winners[signal.symbol] = signal
         return list(winners.values())
+
+    def _liangyi_quality_filter(
+        self,
+        signal: Signal,
+        candles: tuple[list, list],
+    ) -> Signal | None:
+        filter_candles = (
+            candles[1]
+            if self._strategy_configs[
+                "adaptive_liangyi_sixiang"
+            ].adaptive_timeframe_minutes >= 60
+            else candles[0]
+        )
+        return self.adaptive_liangyi_sixiang.score_signal(
+            signal,
+            filter_candles,
+            candles[1],
+        )
+
+    def _liangyi_direction(
+        self,
+        candles: tuple[list, list],
+    ) -> tuple[Side, datetime] | None:
+        filter_candles = (
+            candles[1]
+            if self._strategy_configs[
+                "adaptive_liangyi_sixiang"
+            ].adaptive_timeframe_minutes >= 60
+            else candles[0]
+        )
+        return self.adaptive_liangyi_sixiang.momentum_direction_with_time(
+            filter_candles,
+            candles[1],
+        )
 
 
 def closed_candles(

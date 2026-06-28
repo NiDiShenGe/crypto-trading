@@ -55,6 +55,7 @@ class PaperTradingEngine:
             fills: list[PaperFill] = []
             prices = result.prices
             fills.extend(self._manage_failed_breakouts(result))
+            fills.extend(self._manage_liangyi_filter_exits(result))
             # The 5-minute loop is now an emergency fallback for exits. Normal
             # position management is driven by the realtime WebSocket monitor.
             fills.extend(self._manage_positions(prices))
@@ -183,6 +184,9 @@ class PaperTradingEngine:
         for symbol in list(self.broker.positions):
             if symbol not in prices:
                 continue
+            position = self.broker.positions[symbol]
+            position.current_price = prices[symbol]
+            position.price_updated_at = datetime.now(UTC).isoformat()
             position_fills, _ = self._manage_position(symbol, prices[symbol])
             fills.extend(position_fills)
         return fills
@@ -354,6 +358,56 @@ class PaperTradingEngine:
                     reason = "no_progress_exit"
             if reason:
                 fill = self.broker.close_position(symbol, close, reason)
+                fills.append(fill)
+                self._after_exit(fill)
+        return fills
+
+    def _manage_liangyi_filter_exits(self, result: ScanResult) -> list[PaperFill]:
+        fills: list[PaperFill] = []
+        liangyi_runtime = self.settings.strategies.get(
+            "adaptive_liangyi_sixiang"
+        )
+        required_closes = (
+            liangyi_runtime.liangyi_exit_confirmation_bars
+            if liangyi_runtime else 2
+        )
+        max_peak_r = (
+            liangyi_runtime.liangyi_exit_max_peak_r
+            if liangyi_runtime else 1.0
+        )
+        for symbol in list(self.broker.positions):
+            position = self.broker.positions.get(symbol)
+            if (
+                position is None
+                or position.peak_r >= max_peak_r
+                or symbol not in result.closed_prices
+            ):
+                continue
+            direction = result.liangyi_directions.get(symbol)
+            candle_time = result.liangyi_candle_times.get(symbol)
+            if direction is None or candle_time is None:
+                continue
+            candle_time_key = candle_time.isoformat()
+            if position.last_liangyi_exit_candle_time == candle_time_key:
+                continue
+            position.last_liangyi_exit_candle_time = candle_time_key
+            opposite = (
+                (position.side is Side.LONG and direction == Side.SHORT.value)
+                or (
+                    position.side is Side.SHORT
+                    and direction == Side.LONG.value
+                )
+            )
+            if opposite:
+                position.liangyi_exit_count += 1
+            else:
+                position.liangyi_exit_count = 0
+            if position.liangyi_exit_count >= required_closes:
+                fill = self.broker.close_position(
+                    symbol,
+                    result.closed_prices[symbol],
+                    "liangyi_filter_exit",
+                )
                 fills.append(fill)
                 self._after_exit(fill)
         return fills

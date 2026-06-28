@@ -103,14 +103,14 @@ def test_same_symbol_signal_arbitration_uses_score_then_priority() -> None:
             strategy_id="volatility_squeeze", score=0.6,
         ),
         Signal(
-            "OTHERUSDT", Side.SHORT, 10, 11, 0.8, "pullback",
-            strategy_id="trend_pullback", score=0.8,
+            "OTHERUSDT", Side.SHORT, 10, 11, 0.8, "liangyi",
+            strategy_id="adaptive_liangyi_sixiang", score=0.8,
         ),
     ]
     winners = scanner._arbitrate(signals)
     by_symbol = {signal.symbol: signal for signal in winners}
     assert by_symbol["ALTUSDT"].strategy_id == "volatility_squeeze"
-    assert by_symbol["OTHERUSDT"].strategy_id == "trend_pullback"
+    assert by_symbol["OTHERUSDT"].strategy_id == "adaptive_liangyi_sixiang"
 
 
 def test_market_regime_detects_direction() -> None:

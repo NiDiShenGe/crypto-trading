@@ -197,7 +197,8 @@ def main() -> None:
         _build_notifier() if email_configured else None,
         runtime_state=runtime_state,
     )
-    scanner = MarketScanner(BitgetClient(demo_mode=True), settings)
+    public_client = BitgetClient(demo_mode=True)
+    scanner = MarketScanner(public_client, settings)
     print(
         f"paper account: cash={broker.cash:.4f} USDT "
         f"open_positions={len(broker.positions)}"
@@ -207,7 +208,11 @@ def main() -> None:
         _scan_and_report(scanner, store, engine, execute_trades=False)
         return
 
-    monitor = BitgetPositionMonitor(engine, store)
+    monitor = BitgetPositionMonitor(
+        engine,
+        store,
+        public_client,
+    )
     monitor.start()
     print("position monitor: Bitget WebSocket realtime ticker")
     print(

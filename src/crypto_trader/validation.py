@@ -18,8 +18,8 @@ from .optimization import (
 
 STRATEGY_IDS = (
     "breakout_retest",
-    "trend_pullback",
     "volatility_squeeze",
+    "adaptive_liangyi_sixiang",
 )
 
 

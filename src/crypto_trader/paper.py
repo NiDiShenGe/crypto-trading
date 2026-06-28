@@ -33,6 +33,8 @@ class PaperPosition:
     strategy_id: str = "breakout_retest"
     invalidation_level: float = 0.0
     failure_close_count: int = 0
+    liangyi_exit_count: int = 0
+    last_liangyi_exit_candle_time: str = ""
 
 
 @dataclass(frozen=True)
@@ -241,6 +243,8 @@ class PaperBroker:
                     raw.get("breakout_level", 0.0) or 0.0
                 )
             raw.setdefault("failure_close_count", 0)
+            raw.setdefault("liangyi_exit_count", 0)
+            raw.setdefault("last_liangyi_exit_candle_time", "")
             position = PaperPosition(
                 **{
                     **raw,

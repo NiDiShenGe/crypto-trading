@@ -7,7 +7,10 @@ from datetime import date, datetime, timedelta
 from .config import Settings
 from .domain import Candle, Side, Signal
 from .indicators import closes_interval, resample_candles
-from .strategies import TrendPullbackStrategy, VolatilitySqueezeStrategy
+from .strategies import (
+    AdaptiveLiangyiSixiangStrategy,
+    VolatilitySqueezeStrategy,
+)
 from .strategy import BreakoutRetestStrategy
 from .scanner import market_regime, regime_allows_side
 
@@ -106,13 +109,15 @@ class MultiStrategyBacktester:
         self.settings = settings
         strategies = {
             "breakout_retest": BreakoutRetestStrategy(settings.strategy),
-            "trend_pullback": TrendPullbackStrategy(
-                settings.strategy, settings.strategies["trend_pullback"]
-            ),
             "volatility_squeeze": VolatilitySqueezeStrategy(
                 settings.strategy, settings.strategies["volatility_squeeze"]
             ),
+            "adaptive_liangyi_sixiang": AdaptiveLiangyiSixiangStrategy(
+                settings.strategy,
+                settings.strategies["adaptive_liangyi_sixiang"],
+            ),
         }
+        self.liangyi_filter = strategies["adaptive_liangyi_sixiang"]
         self.strategies = {
             strategy_id: strategy
             for strategy_id, strategy in strategies.items()
@@ -249,6 +254,7 @@ class MultiStrategyBacktester:
                     self.settings.strategy.minimum_btc_regime_return,
                 )
                 signal_window = candles[max(0, index - 499): index + 1]
+                filter_window = candles[max(0, index - 9000): index + 1]
                 fifteen_end = bisect_right(
                     fifteen_close_times, close_time
                 )
@@ -260,16 +266,19 @@ class MultiStrategyBacktester:
                     strategy_candles = (
                         fifteen_window
                         if strategy_id in {
-                            "trend_pullback",
                             "volatility_squeeze",
+                            "adaptive_liangyi_sixiang",
                         }
                         else signal_window
                     )
-                    signals.append(
-                        strategy.evaluate(
-                            symbol, strategy_candles, trend
-                        )
+                    signal = strategy.evaluate(
+                        symbol, strategy_candles, trend
                     )
+                    if signal is not None and strategy_id != "adaptive_liangyi_sixiang":
+                        signal = self.liangyi_filter.score_signal(
+                            signal, filter_window, trend
+                        )
+                    signals.append(signal)
                 valid = [signal for signal in signals if signal is not None]
                 if self.settings.strategy.use_btc_market_regime:
                     valid = [

@@ -133,6 +133,50 @@ def test_six_bars_without_half_r_progress_exits() -> None:
         assert fills[0].reason == "no_progress_exit"
 
 
+def test_two_liangyi_opposite_closes_exit_before_one_r() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = EventStore(Path(directory) / "test.sqlite3")
+        store.initialize()
+        broker = PaperBroker(slippage_rate=0)
+        engine = PaperTradingEngine(settings(), store, broker)
+        signal = Signal("ALTUSDT", Side.LONG, 10, 9, 0.9, "test")
+        engine.process(result(10, [signal]))
+        first = datetime(2026, 1, 1, 4, tzinfo=UTC)
+        scan = ScanResult(
+            datetime.now(UTC),
+            1,
+            1,
+            1,
+            (),
+            {"ALTUSDT": 10.2},
+            {},
+            {"ALTUSDT": 10.2},
+            {"ALTUSDT": first},
+            {"ALTUSDT": "short"},
+            {"ALTUSDT": first},
+        )
+        assert engine.process(scan) == []
+        assert "ALTUSDT" in broker.positions
+
+        second = datetime(2026, 1, 1, 8, tzinfo=UTC)
+        scan = ScanResult(
+            datetime.now(UTC),
+            1,
+            1,
+            1,
+            (),
+            {"ALTUSDT": 10.2},
+            {},
+            {"ALTUSDT": 10.2},
+            {"ALTUSDT": second},
+            {"ALTUSDT": "short"},
+            {"ALTUSDT": second},
+        )
+        fills = engine.process(scan)
+        assert fills[0].reason == "liangyi_filter_exit"
+        assert "ALTUSDT" not in broker.positions
+
+
 def test_profitable_stop_is_classified_as_trailing_stop() -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = EventStore(Path(directory) / "test.sqlite3")

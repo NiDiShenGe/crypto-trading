@@ -128,6 +128,23 @@ class StrategyRuntimeConfig:
     squeeze_use_trend_continuation: bool = True
     squeeze_range_contraction_ratio: float = 1.0
     squeeze_pullback_volume_ratio: float = 1.0
+    adaptive_timeframe_minutes: int = 15
+    efficiency_period: int = 20
+    efficiency_range: int = 20
+    minimum_efficiency_ma: float = 0.45
+    momentum_ema_period: int = 20
+    minimum_momentum: float = 0.0008
+    minimum_momentum_z: float = 0.35
+    momentum_lookback: int = 160
+    trend_fast_period: int = 20
+    trend_slow_period: int = 50
+    minimum_trend_separation_atr: float = 0.25
+    volume_relative_period: int = 20
+    momentum_relaunch_bars: int = 5
+    minimum_price_breakout_atr: float = 0.10
+    require_pullback_structure: bool = False
+    liangyi_exit_confirmation_bars: int = 2
+    liangyi_exit_max_peak_r: float = 1.0
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,7 @@ from .indicators import (
     ema,
     resample_candles,
 )
-from .strategies import VolatilitySqueezeStrategy
+from .strategies import AdaptiveLiangyiSixiangStrategy, VolatilitySqueezeStrategy
 
 
 @dataclass(frozen=True)
@@ -200,34 +200,6 @@ class StrategyOptimizer:
                     (0.0025, 0.004),
                 )
             ]
-        if strategy_id == "trend_pullback":
-            return [
-                {
-                    "volume_contraction_ratio": volume,
-                    "atr_buffer": buffer,
-                    "confirmation_lookback": confirmation,
-                    "first_take_profit_at_r": take_profit,
-                    "trailing_atr_multiple": trail,
-                    "no_progress_bars": max_bars,
-                    "minimum_trend_efficiency": efficiency,
-                    "confirmation_volume_multiplier": confirmation_volume,
-                    "stop_atr_multiple": stop,
-                    "minimum_atr_ratio": atr_ratio,
-                }
-                for volume, buffer, confirmation, take_profit, trail, max_bars, efficiency, confirmation_volume, stop, atr_ratio
-                in product(
-                    (0.90, 1.10),
-                    (0.50,),
-                    (2,),
-                    (2.0,),
-                    (3.0,),
-                    (6, 12),
-                    (0.15, 0.30),
-                    (0.80, 1.0),
-                    (2.0, 3.0),
-                    (0.0025, 0.004),
-                )
-            ]
         if strategy_id == "volatility_squeeze":
             return [
                 {
@@ -256,6 +228,40 @@ class StrategyOptimizer:
                     (0.50,),
                     (2.0,),
                     (0.0025,),
+                )
+            ]
+        if strategy_id == "adaptive_liangyi_sixiang":
+            return [
+                {
+                    "efficiency_period": period,
+                    "efficiency_range": adaptive_range,
+                    "minimum_efficiency_ma": efficiency_ma,
+                    "momentum_ema_period": momentum_ema,
+                    "minimum_momentum": momentum,
+                    "minimum_momentum_z": momentum_z,
+                    "minimum_trend_efficiency": trend_efficiency,
+                    "minimum_trend_separation_atr": separation,
+                    "minimum_signal_score": signal_score,
+                    "no_progress_bars": max_bars,
+                    "trailing_atr_multiple": trail,
+                    "stop_atr_multiple": stop,
+                    "minimum_atr_ratio": atr_ratio,
+                }
+                for period, adaptive_range, efficiency_ma, momentum_ema, momentum, momentum_z, trend_efficiency, separation, signal_score, max_bars, trail, stop, atr_ratio
+                in product(
+                    (20,),
+                    (20,),
+                    (0.30, 0.45),
+                    (20,),
+                    (0.0008,),
+                    (0.35,),
+                    (0.20, 0.30),
+                    (0.25,),
+                    (0.70, 0.75),
+                    (216,),
+                    (2.0,),
+                    (2.0,),
+                    (0.003,),
                 )
             ]
         raise ValueError(f"unknown strategy: {strategy_id}")
@@ -445,16 +451,24 @@ def _candidate_scores(
         settings.strategy,
         settings.strategies["volatility_squeeze"],
     )
+    liangyi = (
+        AdaptiveLiangyiSixiangStrategy(
+            settings.strategy,
+            settings.strategies["adaptive_liangyi_sixiang"],
+        )
+        if "adaptive_liangyi_sixiang" in settings.strategies
+        else None
+    )
     hourly = (
         resample_candles(candles, 60)
         if (
-            strategy_id == "trend_pullback"
-            or (
+            (
                 strategy_id == "volatility_squeeze"
                 and settings.strategies[
                     "volatility_squeeze"
                 ].squeeze_use_trend_continuation
             )
+            or strategy_id == "adaptive_liangyi_sixiang"
         )
         else []
     )
@@ -493,27 +507,7 @@ def _candidate_scores(
             result[timestamp] = (
                 (high - low) / midpoint if midpoint > 0 else 0
             ) + abs(momentum) * 5
-        elif strategy_id == "trend_pullback":
-            trend_end = bisect_right(
-                hourly_close_times,
-                candles[index].timestamp + timedelta(minutes=5),
-            )
-            trend = hourly[max(0, trend_end - 250):trend_end]
-            closes = [item.close for item in trend]
-            if len(closes) < settings.strategy.ema_slow_period + 4:
-                continue
-            fast = ema(closes, settings.strategy.ema_fast_period)
-            slow = ema(closes, settings.strategy.ema_slow_period)
-            previous_fast = ema(
-                closes[:-3], settings.strategy.ema_fast_period
-            )
-            result[timestamp] = (
-                abs(fast - slow) / max(abs(slow), 1e-12) * 10
-                + abs(fast - previous_fast)
-                / max(abs(previous_fast), 1e-12)
-                * 20
-            )
-        else:
+        elif strategy_id == "volatility_squeeze":
             if settings.strategies[
                 "volatility_squeeze"
             ].squeeze_use_trend_continuation:
@@ -541,4 +535,13 @@ def _candidate_scores(
                 max(0, squeeze_end - 180):squeeze_end
             ]
             result[timestamp] = squeeze.setup_score(setup_window)
+        else:
+            if liangyi is None:
+                continue
+            trend_end = bisect_right(
+                hourly_close_times,
+                candles[index].timestamp + timedelta(minutes=5),
+            )
+            trend = hourly[max(0, trend_end - 250):trend_end]
+            result[timestamp] = liangyi.setup_score(window, trend)
     return result

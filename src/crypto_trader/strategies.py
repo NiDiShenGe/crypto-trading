@@ -1346,6 +1346,348 @@ def _rolling_bandwidths(
     return result
 
 
+class AdaptiveLiangyiSixiangStrategy:
+    """Adaptive market-efficiency and volume-weighted momentum trend follower."""
+
+    strategy_id = "adaptive_liangyi_sixiang"
+
+    def __init__(
+        self,
+        base: StrategyConfig,
+        runtime: StrategyRuntimeConfig,
+    ) -> None:
+        self.base = base
+        self.runtime = runtime
+
+    def setup_score(
+        self,
+        signal_candles: Sequence[Candle],
+        trend_candles: Sequence[Candle],
+    ) -> float:
+        state = self._state(signal_candles, trend_candles)
+        if state is None:
+            return 0.0
+        return state["score"]
+
+    def momentum_direction(
+        self,
+        signal_candles: Sequence[Candle],
+        trend_candles: Sequence[Candle],
+    ) -> Side | None:
+        result = self.momentum_direction_with_time(
+            signal_candles, trend_candles
+        )
+        return result[0] if result else None
+
+    def momentum_direction_with_time(
+        self,
+        signal_candles: Sequence[Candle],
+        trend_candles: Sequence[Candle],
+    ) -> tuple[Side, datetime] | None:
+        state = self._state(signal_candles, trend_candles)
+        if state is None:
+            return None
+        if state["momentum"] > 0:
+            return (
+                Side.LONG,
+                state["confirmation"].timestamp
+                + timedelta(minutes=self.runtime.adaptive_timeframe_minutes),
+            )
+        if state["momentum"] < 0:
+            return (
+                Side.SHORT,
+                state["confirmation"].timestamp
+                + timedelta(minutes=self.runtime.adaptive_timeframe_minutes),
+            )
+        return None
+
+    def evaluate(
+        self,
+        symbol: str,
+        signal_candles: Sequence[Candle],
+        trend_candles: Sequence[Candle],
+    ) -> Signal | None:
+        structure_signal = None
+        if self.runtime.require_pullback_structure:
+            structure_signal = TrendPullbackStrategy(
+                self.base,
+                self.runtime,
+            )._evaluate_four_hour_pullback(
+                symbol,
+                signal_candles,
+                trend_candles,
+            )
+            if structure_signal is None:
+                return None
+        state = self._state(signal_candles, trend_candles)
+        if structure_signal is not None:
+            liangyi_aligned = (
+                state is not None
+                and (
+                    (state["momentum"] > 0 and structure_signal.side is Side.LONG)
+                    or (
+                        state["momentum"] < 0
+                        and structure_signal.side is Side.SHORT
+                    )
+                )
+            )
+            blended_score = structure_signal.score
+            if state is not None:
+                if liangyi_aligned:
+                    blended_score = min(
+                        structure_signal.score * 0.70
+                        + state["score"] * 0.30
+                        + 0.05,
+                        1.0,
+                    )
+                else:
+                    blended_score = max(
+                        structure_signal.score * 0.90
+                        + state["score"] * 0.10
+                        - 0.05,
+                        0.0,
+                    )
+            return Signal(
+                symbol=symbol,
+                side=structure_signal.side,
+                entry=structure_signal.entry,
+                stop=structure_signal.stop,
+                confidence=round(blended_score, 4),
+                reason=(
+                    "pullback continuation ranked by adaptive liangyi "
+                    "volume-weighted momentum"
+                ),
+                breakout_level=structure_signal.breakout_level,
+                strategy_id=self.strategy_id,
+                score=round(blended_score, 4),
+                invalidation_level=structure_signal.invalidation_level,
+            )
+        if state is None or state["score"] < self.runtime.minimum_signal_score:
+            return None
+        momentum = state["momentum"]
+        if abs(momentum) < self.runtime.minimum_momentum:
+            return None
+        if state["momentum_z"] < self.runtime.minimum_momentum_z:
+            return None
+        side = Side.LONG if momentum > 0 else Side.SHORT
+        if not self._trend_allows(state, side):
+            return None
+
+        confirmation = state["confirmation"]
+        volatility = state["volatility"]
+        if volatility / max(confirmation.close, 1e-12) < self.base.minimum_atr_ratio:
+            return None
+        lookback = min(8, len(state["candles"]) - 1)
+        recent = list(state["candles"][-(lookback + 1):-1])
+        if len(recent) < 3:
+            return None
+        penetration = volatility * self.runtime.minimum_price_breakout_atr
+        if side is Side.LONG:
+            price_relaunch = confirmation.close > max(c.close for c in recent) + penetration
+            directional_close = confirmation.close > confirmation.open
+        else:
+            price_relaunch = confirmation.close < min(c.close for c in recent) - penetration
+            directional_close = confirmation.close < confirmation.open
+        momentum_relaunch = self._momentum_relaunch(state, side)
+        if not directional_close or not (price_relaunch or momentum_relaunch):
+            return None
+        if side is Side.LONG:
+            invalidation = min(c.low for c in recent)
+            stop = min(
+                invalidation - volatility * self.runtime.atr_buffer,
+                confirmation.close - volatility * self.base.stop_atr_multiple,
+            )
+            breakout_level = max(c.high for c in recent)
+        else:
+            invalidation = max(c.high for c in recent)
+            stop = max(
+                invalidation + volatility * self.runtime.atr_buffer,
+                confirmation.close + volatility * self.base.stop_atr_multiple,
+            )
+            breakout_level = min(c.low for c in recent)
+        if abs(confirmation.close - stop) <= 0:
+            return None
+        return Signal(
+            symbol=symbol,
+            side=side,
+            entry=confirmation.close,
+            stop=stop,
+            confidence=state["score"],
+            reason=(
+                "adaptive efficiency cycle with normalized volume-weighted "
+                "liangyi momentum"
+            ),
+            breakout_level=breakout_level,
+            strategy_id=self.strategy_id,
+            score=state["score"],
+            invalidation_level=invalidation,
+        )
+
+    def score_signal(
+        self,
+        signal: Signal,
+        signal_candles: Sequence[Candle],
+        trend_candles: Sequence[Candle],
+    ) -> Signal | None:
+        """Use Liangyi/Sixiang as a cross-strategy quality filter."""
+        state = self._state(signal_candles, trend_candles)
+        if state is None:
+            return signal
+        momentum = state["momentum"]
+        aligned = (
+            (signal.side is Side.LONG and momentum > 0)
+            or (signal.side is Side.SHORT and momentum < 0)
+        )
+        strong_state = state["score"] >= self.runtime.minimum_signal_score
+        strong_momentum = (
+            abs(momentum) >= self.runtime.minimum_momentum
+            and state["momentum_z"] >= self.runtime.minimum_momentum_z
+        )
+        if strong_state and strong_momentum and not aligned:
+            return None
+        if not strong_momentum and state["score"] < 0.50:
+            return None
+        if aligned:
+            score = min(signal.score * 0.70 + state["score"] * 0.30 + 0.03, 1.0)
+        else:
+            score = max(signal.score * 0.80 + state["score"] * 0.20 - 0.05, 0.0)
+        return Signal(
+            symbol=signal.symbol,
+            side=signal.side,
+            entry=signal.entry,
+            stop=signal.stop,
+            confidence=round(score, 4),
+            reason=f"{signal.reason}; liangyi quality score applied",
+            breakout_level=signal.breakout_level,
+            strategy_id=signal.strategy_id,
+            score=round(score, 4),
+            invalidation_level=signal.invalidation_level,
+        )
+
+    def _state(
+        self,
+        signal_candles: Sequence[Candle],
+        trend_candles: Sequence[Candle],
+    ) -> dict | None:
+        interval = self.runtime.adaptive_timeframe_minutes
+        if not signal_candles:
+            return None
+        spacing_seconds = (
+            (signal_candles[-1].timestamp - signal_candles[-2].timestamp).total_seconds()
+            if len(signal_candles) >= 2
+            else 0
+        )
+        if spacing_seconds < interval * 60 and not _closes_interval_seconds(
+            signal_candles[-1],
+            interval,
+            int(spacing_seconds) if spacing_seconds > 0 else 300,
+        ):
+            return None
+        candles = _as_interval(signal_candles, interval)
+        n1 = self.runtime.efficiency_period
+        n2 = self.runtime.efficiency_range
+        required = max(
+            n1 + n2 + self.runtime.momentum_ema_period + 5,
+            self.runtime.momentum_lookback,
+            self.base.atr_period + 2,
+            self.runtime.volume_relative_period + 2,
+        )
+        if len(candles) < required or len(trend_candles) < self.runtime.trend_slow_period + 5:
+            return None
+        efficiencies = _market_efficiency_series(candles, n1)
+        if len(efficiencies) < self.runtime.momentum_ema_period + 2:
+            return None
+        efficiency_ma_series = _ema_series(efficiencies, n1)
+        efficiency_ma = efficiency_ma_series[-1]
+        if efficiency_ma < self.runtime.minimum_efficiency_ma:
+            return None
+        mer = int(n1 - (efficiency_ma - 0.5) * n2)
+        mer = max(3, min(n1 + n2, mer))
+        normalized = _normalized_liangyi_series(
+            candles,
+            mer,
+            self.runtime.volume_relative_period,
+        )
+        if len(normalized) < self.runtime.momentum_ema_period + 3:
+            return None
+        momentum_series = _ema_series(normalized, self.runtime.momentum_ema_period)
+        momentum = momentum_series[-1]
+        recent_momentum = momentum_series[-min(len(momentum_series), 80):]
+        mean_abs = sum(abs(value) for value in recent_momentum) / len(recent_momentum)
+        momentum_z = abs(momentum) / max(mean_abs, 1e-12)
+        volatility = atr(candles, self.base.atr_period)
+        trend_closes = [c.close for c in trend_candles]
+        fast_series = _ema_series(trend_closes, self.runtime.trend_fast_period)
+        slow_series = _ema_series(trend_closes, self.runtime.trend_slow_period)
+        trend_volatility = atr(trend_candles, self.base.atr_period)
+        trend_efficiency = efficiency_ratio(trend_closes, n1)
+        separation = abs(fast_series[-1] - slow_series[-1]) / max(trend_volatility, 1e-12)
+        score = min(
+            min(efficiency_ma / 0.75, 1.0) * 0.30
+            + min(momentum_z / 2.0, 1.0) * 0.30
+            + min(separation / 2.0, 1.0) * 0.25
+            + min(trend_efficiency / 0.65, 1.0) * 0.15,
+            1.0,
+        )
+        return {
+            "candles": candles,
+            "confirmation": candles[-1],
+            "volatility": volatility,
+            "momentum": momentum,
+            "momentum_z": momentum_z,
+            "efficiency_ma": efficiency_ma,
+            "mer": mer,
+            "trend_fast": fast_series[-1],
+            "trend_slow": slow_series[-1],
+            "trend_fast_previous": fast_series[-3],
+            "trend_slow_previous": slow_series[-3],
+            "trend_close": trend_closes[-1],
+            "trend_efficiency": trend_efficiency,
+            "trend_separation": separation,
+            "trend_volatility": trend_volatility,
+            "momentum_series": momentum_series,
+            "score": round(score, 4),
+        }
+
+    def _trend_allows(self, state: dict, side: Side) -> bool:
+        if (
+            state["trend_separation"]
+            < self.runtime.minimum_trend_separation_atr
+            or state["trend_efficiency"]
+            < self.runtime.minimum_trend_efficiency
+        ):
+            return False
+        if side is Side.LONG:
+            return (
+                state["trend_fast"] > state["trend_slow"]
+                and state["trend_fast"] >= state["trend_fast_previous"]
+                and state["trend_close"] > state["trend_fast"]
+            )
+        return (
+            state["trend_fast"] < state["trend_slow"]
+            and state["trend_fast"] <= state["trend_fast_previous"]
+            and state["trend_close"] < state["trend_fast"]
+        )
+
+    def _momentum_relaunch(self, state: dict, side: Side) -> bool:
+        series = state["momentum_series"]
+        bars = max(2, self.runtime.momentum_relaunch_bars)
+        if len(series) < bars + 1:
+            return False
+        previous = series[-(bars + 1):-1]
+        current = series[-1]
+        threshold = self.runtime.minimum_momentum
+        if side is Side.LONG:
+            return (
+                current > threshold
+                and max(previous) <= threshold
+            ) or current >= max(previous) * 1.15
+        return (
+            current < -threshold
+            and min(previous) >= -threshold
+        ) or current <= min(previous) * 1.15
+
+
 def _ema_series(
     values: Sequence[float], period: int
 ) -> list[float]:
@@ -1390,6 +1732,17 @@ def _as_interval(
     )
 
 
+def _closes_interval_seconds(
+    candle: Candle,
+    interval_minutes: int,
+    base_seconds: int,
+) -> bool:
+    if base_seconds <= 0:
+        base_seconds = 300
+    close_timestamp = candle.timestamp + timedelta(seconds=base_seconds)
+    return int(close_timestamp.timestamp()) % (interval_minutes * 60) == 0
+
+
 def _rolling_normalized_atr(
     candles: Sequence[Candle], period: int
 ) -> list[float]:
@@ -1410,3 +1763,53 @@ def _rolling_normalized_atr(
         candle = candles[index + 1]
         result.append(total / period / max(candle.close, 1e-12))
     return result
+
+
+def _market_efficiency_series(
+    candles: Sequence[Candle],
+    period: int,
+) -> list[float]:
+    if period <= 1 or len(candles) < period + 1:
+        return []
+    closes = [c.close for c in candles]
+    result: list[float] = []
+    for index in range(period, len(closes)):
+        window = closes[index - period:index + 1]
+        range_move = max(window) - min(window)
+        displacement = abs(closes[index] - closes[index - period])
+        path = sum(
+            abs(current - previous)
+            for previous, current in zip(window, window[1:])
+        )
+        result.append(max(range_move, displacement) / path if path > 0 else 0.0)
+    return result
+
+
+def _normalized_liangyi_series(
+    candles: Sequence[Candle],
+    period: int,
+    volume_period: int,
+) -> list[float]:
+    if len(candles) < max(period, volume_period) + 2:
+        return []
+    closes = [c.close for c in candles]
+    volumes = [c.volume for c in candles]
+    signed_flow: list[float] = []
+    for index in range(1, len(candles)):
+        previous = closes[index - 1]
+        if previous <= 0:
+            signed_flow.append(0.0)
+            continue
+        volume_start = max(0, index - volume_period + 1)
+        average_volume = (
+            sum(volumes[volume_start:index + 1])
+            / (index + 1 - volume_start)
+        )
+        relative_volume = volumes[index] / max(average_volume, 1e-12)
+        signed_flow.append((closes[index] / previous - 1) * relative_volume)
+    if len(signed_flow) < period:
+        return []
+    return [
+        sum(signed_flow[index - period:index])
+        for index in range(period, len(signed_flow) + 1)
+    ]

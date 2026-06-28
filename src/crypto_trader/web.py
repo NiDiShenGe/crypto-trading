@@ -13,8 +13,8 @@ from .storage import EventStore
 STATIC_DIR = Path(__file__).with_name("web_static")
 STRATEGY_NAMES = {
     "breakout_retest": "突破回踩",
-    "trend_pullback": "趋势回调延续",
     "volatility_squeeze": "波动压缩爆发",
+    "adaptive_liangyi_sixiang": "两仪四象自适应",
 }
 
 
